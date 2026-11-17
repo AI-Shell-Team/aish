@@ -30,8 +30,16 @@ impl<'a> MakeWriter<'a> for AnimationAwareMakeWriter {
     }
 }
 
+mod attach_remote;
+mod diag_tasks;
+mod diagnose;
 mod install_channel;
 mod models_auth;
+mod policy_signing;
+mod remote_access;
+mod remote_cmd;
+mod remote_hosts;
+mod remote_identity;
 mod skill_cmd;
 mod tty_watchdog;
 mod uninstall;
@@ -93,6 +101,66 @@ struct Cli {
     // Attach to an existing PTY daemon via socket path (raw terminal passthrough).
     #[arg(long, hide = true)]
     pty_attach: Option<String>,
+
+    // --- Remote C/S extensions (issues #586/#587/#588), agent side ---
+    // List local PTY sessions as JSON lines (remote discovery helper).
+    #[arg(long, hide = true)]
+    remote_sessions: bool,
+
+    // Attach to a local PTY session and pipe the frame protocol on stdio
+    // (remote attach transport helper).
+    #[arg(long, hide = true)]
+    remote_attach: Option<String>,
+
+    // Report the installed remote policy as JSON ('remote policy show').
+    #[arg(long, hide = true)]
+    remote_policy_show: bool,
+
+    // Install a policy envelope passed as an argument; prints a JSON verdict.
+    #[arg(long, hide = true)]
+    remote_policy_install: Option<String>,
+
+    // Install a policy envelope read from stdin (used by `remote policy-push`
+    // to avoid ssh argument-joining issues); prints a JSON verdict.
+    #[arg(long, hide = true)]
+    remote_policy_install_stdin: bool,
+
+    // Rename a remote-visible session: "<session-id> <new-name>".
+    #[arg(long, hide = true)]
+    remote_session_rename: Option<String>,
+
+    // Kill a remote-visible session by UUID.
+    #[arg(long, hide = true)]
+    remote_session_kill: Option<String>,
+
+    // Stream a session's recorded terminal output ("<id> [--tail N]").
+    #[arg(long, hide = true)]
+    remote_session_replay: Option<String>,
+
+    // Tail count for --remote-session-replay.
+    #[arg(long, hide = true)]
+    replay_tail: Option<usize>,
+
+    // Print audit events since --since as JSON lines.
+    #[arg(long, hide = true)]
+    remote_audit_events: bool,
+
+    // Run whitelisted read-only diagnostics; prints JSON lines.
+    #[arg(long, hide = true)]
+    remote_diagnose: bool,
+
+    // Checks list for --remote-diagnose.
+    #[arg(long, hide = true)]
+    checks: Option<String>,
+
+    // Read-only enforcement flag for --remote-diagnose (read-only is
+    // structural via the whitelist; this flag is accepted for symmetry).
+    #[arg(long, hide = true)]
+    enforce_read_only: bool,
+
+    // Since timestamp (RFC 3339) for --remote-audit-events.
+    #[arg(long, hide = true)]
+    since: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -205,6 +273,271 @@ enum Commands {
     Skill {
         #[command(subcommand)]
         action: SkillSubcommand,
+    },
+
+    /// Remote C/S extensions: take over sessions, distribute policy,
+    /// collect audit, run fleet diagnostics over SSH
+    #[command(after_help = "Quick start:
+  aish remote host add prod-1 root@10.10.17.130
+  aish remote session list --host prod-1
+  aish remote session attach --host prod-1")]
+    Remote {
+        #[command(subcommand)]
+        action: RemoteSubcommand,
+    },
+}
+
+/// Subcommands for `aish remote`.
+#[derive(Subcommand)]
+enum RemoteSubcommand {
+    /// Manage known remote hosts
+    Host {
+        #[command(subcommand)]
+        action: RemoteHostAction,
+    },
+    /// Inspect and take over shell sessions on a remote host
+    Session {
+        #[command(subcommand)]
+        action: RemoteSessionAction,
+    },
+    /// Inspect and distribute security policies
+    Policy {
+        #[command(subcommand)]
+        action: RemotePolicyAction,
+    },
+    /// Pull audit events from a remote host into the local audit store
+    Audit {
+        #[command(subcommand)]
+        action: RemoteAuditAction,
+    },
+    /// Run whitelisted read-only diagnostics across hosts
+    Diag {
+        #[command(subcommand)]
+        action: RemoteDiagAction,
+    },
+    /// Self-check the remote C/S setup on a host
+    Doctor {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+    },
+    /// Manage the local admin keypair and policy signers
+    Admin {
+        #[command(subcommand)]
+        action: RemoteAdminAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteAdminAction {
+    /// Generate the admin keypair used to sign policy envelopes
+    Keygen,
+    /// Show the admin public key (distribute this to target hosts)
+    ShowKey,
+    /// Register an admin public key on THIS host (target side)
+    AddSigner {
+        /// Admin public key (64 hex chars)
+        public_key: String,
+    },
+    /// List configured policy signers on THIS host
+    ListSigners,
+    /// Show THIS host's operator identity public key (register on targets)
+    ShowIdentity,
+    /// Register a trusted operator on THIS host (target side)
+    TrustOperator {
+        /// Operator public key (64 hex chars)
+        public_key: String,
+    },
+    /// List trusted operators on THIS host
+    ListOperators,
+    /// Remove a trusted operator from THIS host
+    UntrustOperator {
+        /// Operator public key (64 hex chars)
+        public_key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteHostAction {
+    /// List configured remote hosts
+    List,
+    /// Add a remote host alias
+    Add {
+        /// Short alias to use with --host
+        name: String,
+        /// ssh target (user@host)
+        target: String,
+        /// Remote aish binary path if not in a standard location
+        #[arg(long)]
+        remote_bin: Option<String>,
+        /// Group tags (repeatable). Select with --host group:<tag>
+        #[arg(long = "group")]
+        groups: Vec<String>,
+        /// ssh password (used with sshpass). Prefer AISH_REMOTE_PASSWORD
+        /// in production: it is not persisted anywhere.
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Remove a remote host alias
+    Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum RemoteSessionAction {
+    /// List sessions on a remote host with state and controller
+    List {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach the local terminal to a remote session
+    ///
+    /// The session id may be a full UUID, a unique name, or a unique prefix.
+    /// Omit it to pick interactively. While the session has a live
+    /// controller you will join as a read-only observer.
+    Attach {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+        /// Session name, prefix, or UUID
+        session: Option<String>,
+    },
+    /// Rename a remote session
+    Rename {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+        /// Session name, prefix, or UUID
+        session: String,
+        /// New name
+        #[arg(long)]
+        to: String,
+    },
+    /// Kill a remote session
+    Kill {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+        /// Session name, prefix, or UUID
+        session: String,
+    },
+    /// Replay a recorded session's terminal output
+    ///
+    /// Prints the session's recorded terminal output (asciinema-compatible
+    /// capture) to stdout. Works for live and exited sessions alike.
+    Replay {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+        /// Session name, prefix, or UUID
+        session: String,
+        /// Show only the last N lines
+        #[arg(long)]
+        tail: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemotePolicyAction {
+    /// Validate and install a policy on a remote host
+    ///
+    /// Version is auto-incremented per host. Add --diff to preview the
+    /// change against the currently installed policy before pushing.
+    Push {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+        /// Local policy YAML file to install
+        #[arg(long)]
+        policy: String,
+        /// Target globs the remote host must match (empty = any host)
+        #[arg(long, default_value = "*")]
+        targets: String,
+        /// Override the auto-incremented version
+        #[arg(long)]
+        version: Option<u64>,
+        /// Show the diff against the installed policy and ask before pushing
+        #[arg(long)]
+        diff: bool,
+        /// Skip the confirmation prompt (for scripts)
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show the currently effective policy on a remote host
+    Show {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+    },
+    /// Policy drift detection across hosts
+    ///
+    /// Compares each host's installed policy version/issuer against the
+    /// local expectation (what we last pushed) and flags hosts that are
+    /// missing updates or whose policy changed outside this control host.
+    /// Omit --host to scan every configured alias.
+    Status {
+        /// Remote hosts, comma-separated (aliases, ssh targets, group:tags);
+        /// defaults to all configured aliases
+        #[arg(long)]
+        host: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteAuditAction {
+    /// Pull remote audit events into the local audit store
+    ///
+    /// Incremental: pulls events newer than the last sync cursor for this
+    /// host and merges them with deduplication. Delete the cursor file
+    /// (~/.config/aish/remote-sync/<host>.ts) to re-pull everything.
+    Pull {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+        /// Local audit DB path (defaults to the standard session DB)
+        #[arg(long)]
+        db: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteDiagAction {
+    /// Run whitelisted read-only checks across hosts and save the task
+    Run {
+        /// Comma-separated hosts (aliases or user@host). Also accepts a
+        /// single host, matching the rest of the CLI's --host flag.
+        #[arg(long, alias = "host")]
+        hosts: String,
+        /// Comma-separated check names (svc, ports, logs, disk, load)
+        #[arg(long)]
+        checks: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// List saved diagnostic tasks
+    List,
+    /// Show a saved task's per-host status and results
+    Status {
+        /// Task id (from 'aish remote diag list')
+        task: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-run only the hosts that failed in a saved task
+    Retry {
+        /// Task id (from 'aish remote diag list')
+        task: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -444,6 +777,250 @@ fn main() {
         let _ = run_pty_raw_attach(socket_path, &session_id, &daemon_launch_config);
         return;
     }
+    // --- Remote C/S agent-side hidden entries (invoked over ssh) ---
+    // Operator identity gate: when trusted operators are configured, every
+    // --remote-* entry requires a signed challenge that verifies against one
+    // of them. The identity JSON arrives as the first stdin line. Open mode
+    // (no trusted keys) behaves exactly as before, so single-host usage is
+    // unchanged.
+    // The gate must only run for AGENT entries (--remote-*). The presence
+    // of any of these flags is the definitive signal that this process was
+    // spawned by a remote client; every other subcommand (including the
+    // local `remote admin/diag list` management ops) runs without it.
+    let is_agent_entry = cli.remote_sessions
+        || cli.remote_attach.is_some()
+        || cli.remote_policy_show
+        || cli.remote_policy_install.is_some()
+        || cli.remote_policy_install_stdin
+        || cli.remote_session_rename.is_some()
+        || cli.remote_session_kill.is_some()
+        || cli.remote_session_replay.is_some()
+        || cli.remote_audit_events
+        || cli.remote_diagnose;
+    if remote_identity::enforcement_active() && is_agent_entry {
+        tty_watchdog::disarm();
+        let action = remote_cmd::agent_action_name(
+            cli.remote_sessions,
+            cli.remote_attach.is_some(),
+            cli.remote_policy_show,
+            cli.remote_policy_install.is_some() || cli.remote_policy_install_stdin,
+            cli.remote_session_rename.is_some(),
+            cli.remote_session_kill.is_some(),
+            cli.remote_session_replay.is_some(),
+            cli.remote_audit_events,
+            cli.remote_diagnose,
+        );
+        let mut first_line: Option<String> = None;
+        let mut operator_key: Option<String> = None;
+        let authed = remote_identity::authenticate_agent_action(
+            action,
+            || {
+                if first_line.is_none() {
+                    let mut line = String::new();
+                    match std::io::stdin().read_line(&mut line) {
+                        Ok(0) | Err(_) => None,
+                        Ok(_) => {
+                            let trimmed = line.trim().to_string();
+                            // Remember the presenting operator for RBAC.
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&trimmed) {
+                                operator_key =
+                                    v.get("pubkey").and_then(|k| k.as_str()).map(String::from);
+                            }
+                            first_line = Some(trimmed);
+                            first_line.clone()
+                        }
+                    }
+                } else {
+                    first_line.clone()
+                }
+            },
+            |reason| {
+                println!(
+                    "{}",
+                    serde_json::json!({"auth_failed": true, "reason": reason})
+                );
+            },
+        );
+        if !authed {
+            std::process::exit(2);
+        }
+        // Authorization (RBAC): the installed policy's remote_access section
+        // may restrict which operators may perform which actions.
+        if let Some(key) = &operator_key {
+            // A policy file that exists but cannot be read must fail closed
+            // (review fix): treat as auth failure, not as "no policy".
+            let yaml = match remote_access::installed_policy_yaml() {
+                Ok(yaml) => yaml,
+                Err(reason) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "auth_failed": true,
+                            "reason": reason,
+                        })
+                    );
+                    std::process::exit(4);
+                }
+            };
+            if !remote_access::authorize_action(&yaml, action, key) {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "auth_failed": true,
+                        "reason": format!(
+                            "operator {key} is not authorized for '{action}' by this host's remote_access policy"
+                        ),
+                    })
+                );
+                std::process::exit(3);
+            }
+        }
+    } else if is_agent_entry {
+        // Open mode: the client still sends the identity line to keep the
+        // wire format uniform; consume and discard it so the relay / the
+        // envelope reader see clean stdin.
+        tty_watchdog::disarm();
+        remote_identity::consume_identity_line_if_present();
+    }
+    // Attach over-read recovery: the identity gate's `read_line` buffers up
+    // to 8 KiB from fd 0, typically swallowing the attach frame the client
+    // writes immediately after the identity line. Drain whatever is still
+    // sitting in the Stdin BufRead buffer and hand it to the relay so the
+    // daemon actually receives the handshake. Applies in both enforcement
+    // and open mode (the gate/consume runs before this in either).
+    //
+    // The buffer check must be non-blocking: in an interactive attach the
+    // client keeps stdin open, so a second `fill_buf` would block forever
+    // waiting for keystrokes that arrive long after the handshake. Poll fd 0
+    // first and only pull bytes that are already buffered.
+    let mut attach_prefix: Vec<u8> = Vec::new();
+    if cli.remote_attach.is_some() {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        let mut lock = stdin.lock();
+        // First fill_buf is safe unconditionally: the gate's read_line pulled
+        // bytes into the Stdin buffer, so the first fill_buf returns whatever
+        // is already buffered without touching fd 0.
+        let mut first = true;
+        loop {
+            if !first {
+                // Subsequent fills may need a real fd 0 read; poll first so an
+                // interactive attach (stdin kept open, no more bytes in
+                // flight) does not block here forever.
+                // SAFETY: [Category 8 — FFI] zeroed fd_set + FD_ZERO/FD_SET
+                // with a small fd (0), then a zero-timeout poll.
+                let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+                unsafe {
+                    libc::FD_ZERO(&mut fds);
+                    libc::FD_SET(0, &mut fds);
+                }
+                let mut tv = libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                };
+                let ret = unsafe {
+                    libc::select(
+                        1,
+                        &mut fds,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut tv,
+                    )
+                };
+                if ret <= 0 {
+                    break; // nothing buffered on fd 0 and nothing in flight
+                }
+            }
+            first = false;
+            match lock.fill_buf() {
+                Ok([]) => break, // EOF
+                Ok(chunk) => {
+                    attach_prefix.extend_from_slice(chunk);
+                    let n = chunk.len();
+                    lock.consume(n);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    if cli.remote_sessions {
+        tty_watchdog::disarm();
+        remote_cmd::agent_list_sessions();
+        return;
+    }
+    if let Some(session_id) = &cli.remote_attach {
+        tty_watchdog::disarm();
+        if let Err(e) = remote_cmd::agent_attach(session_id, attach_prefix) {
+            eprintln!("remote attach relay failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cli.remote_policy_show {
+        tty_watchdog::disarm();
+        remote_cmd::agent_policy_show();
+        return;
+    }
+    if let Some(envelope) = &cli.remote_policy_install {
+        tty_watchdog::disarm();
+        remote_cmd::agent_policy_install(envelope);
+        return;
+    }
+    if let Some(selector) = &cli.remote_session_rename {
+        tty_watchdog::disarm();
+        // Format: "<session-id> <new-name>" (single arg, split on first space).
+        let Some((session_id, name)) = selector.split_once(' ') else {
+            eprintln!("--remote-session-rename expects '<session-id> <new-name>'");
+            std::process::exit(1);
+        };
+        if let Err(e) = remote_cmd::agent_session_rename(session_id, name) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(session_id) = &cli.remote_session_kill {
+        tty_watchdog::disarm();
+        if let Err(e) = remote_cmd::agent_session_kill(session_id) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(session_id) = &cli.remote_session_replay {
+        tty_watchdog::disarm();
+        if let Err(e) = remote_cmd::agent_session_replay(session_id, cli.replay_tail) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cli.remote_policy_install_stdin {
+        tty_watchdog::disarm();
+        use std::io::Read;
+        let mut envelope = String::new();
+        // In enforcement mode the auth gate above already consumed the
+        // identity line from stdin; the remainder is the envelope. In open
+        // mode the whole stdin is the envelope (unchanged single-host
+        // behavior).
+        let _ = std::io::stdin().read_to_string(&mut envelope);
+        remote_cmd::agent_policy_install(envelope.trim());
+        return;
+    }
+    if cli.remote_audit_events {
+        tty_watchdog::disarm();
+        remote_cmd::agent_audit_events(cli.since.as_deref());
+        return;
+    }
+    if cli.remote_diagnose {
+        tty_watchdog::disarm();
+        let checks = cli
+            .checks
+            .clone()
+            .unwrap_or_else(|| "svc,ports,logs".to_string());
+        remote_cmd::agent_diagnose(&checks, cli.enforce_read_only);
+        return;
+    }
 
     match cli.command {
         // `aish` or `aish run`: start a fresh shell by default.
@@ -546,6 +1123,364 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Commands::Remote { action }) => {
+            let outcome = run_remote_command(action);
+            if let Err(msg) = outcome {
+                eprintln!("{msg}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// All configured host aliases as (target, remote_bin, password) triples,
+/// for the no-argument full-fleet drift scan.
+fn all_configured_targets() -> Result<Vec<(String, Option<String>, Option<String>)>, String> {
+    let entries = remote_hosts::list()?;
+    if entries.is_empty() {
+        return Err(
+            "no remote hosts configured. Tip: add one with 'aish remote host add <alias> user@host'"
+                .to_string(),
+        );
+    }
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            (
+                e.target,
+                e.remote_bin,
+                // Environment wins over the stored credential (matches the
+                // env_password doc; see remote_hosts::resolve()).
+                remote_hosts::env_password().or(e.password),
+            )
+        })
+        .collect())
+}
+
+/// Expand a comma-separated --host list. Each element may be an alias, a
+/// literal ssh target, or `group:<tag>` (expands to all matching hosts).
+/// Returns (ssh_target, remote_bin_override, password) triples in order.
+fn expand_host_list(host: &str) -> Result<Vec<(String, Option<String>, Option<String>)>, String> {
+    let mut out = Vec::new();
+    for part in host.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(tag) = remote_hosts::group_tag(part) {
+            out.extend(remote_hosts::expand_group(tag)?);
+        } else {
+            out.push(remote_hosts::resolve(part)?);
+        }
+    }
+    if out.is_empty() {
+        return Err("no hosts given".to_string());
+    }
+    Ok(out)
+}
+
+/// Run a `aish remote` subcommand. Extracted so the arm can use `?`
+/// freely; errors are surfaced by the caller.
+fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
+    match action {
+        RemoteSubcommand::Host { action } => match action {
+            RemoteHostAction::List => {
+                let entries = remote_hosts::list()?;
+                if entries.is_empty() {
+                    println!("No remote hosts configured.");
+                    println!("Tip: add one with 'aish remote host add <alias> user@host'");
+                    return Ok(());
+                }
+                println!(
+                    "{:<14} {:<28} {:<20} GROUPS",
+                    "NAME", "TARGET", "REMOTE-BIN"
+                );
+                for e in &entries {
+                    println!(
+                        "{:<14} {:<28} {:<20} {}",
+                        e.name,
+                        e.target,
+                        e.remote_bin.as_deref().unwrap_or("(probe)"),
+                        if e.groups.is_empty() {
+                            "—".to_string()
+                        } else {
+                            e.groups.join(",")
+                        }
+                    );
+                }
+                Ok(())
+            }
+            RemoteHostAction::Add {
+                name,
+                target,
+                remote_bin,
+                groups,
+                password,
+            } => remote_hosts::add(
+                &name,
+                &target,
+                remote_bin.as_deref(),
+                &groups,
+                password.as_deref(),
+            ),
+            RemoteHostAction::Remove { name } => {
+                if remote_hosts::remove(&name)? {
+                    println!("removed alias '{name}'");
+                    Ok(())
+                } else {
+                    Err(format!("no alias named '{name}'"))
+                }
+            }
+        },
+        RemoteSubcommand::Session { action } => match action {
+            RemoteSessionAction::List { host, json } => {
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
+                if let Some(bin) = remote_bin {
+                    std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+                }
+                remote_cmd::cmd_session_list(&target, json)
+            }
+            RemoteSessionAction::Attach { host, session } => {
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
+                if let Some(bin) = remote_bin {
+                    std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+                }
+                let session_id = session.unwrap_or_default();
+                remote_cmd::cmd_session_attach(&target, &session_id)
+            }
+            RemoteSessionAction::Rename { host, session, to } => {
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
+                if let Some(bin) = remote_bin {
+                    std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+                }
+                remote_cmd::cmd_session_rename(&target, &session, &to)
+            }
+            RemoteSessionAction::Kill { host, session } => {
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
+                if let Some(bin) = remote_bin {
+                    std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+                }
+                remote_cmd::cmd_session_kill(&target, &session)
+            }
+            RemoteSessionAction::Replay {
+                host,
+                session,
+                tail,
+            } => {
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
+                if let Some(bin) = remote_bin {
+                    std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+                }
+                remote_cmd::cmd_session_replay(&target, &session, tail)
+            }
+        },
+        RemoteSubcommand::Policy { action } => match action {
+            RemotePolicyAction::Push {
+                host,
+                policy,
+                targets,
+                version,
+                diff,
+                yes,
+            } => {
+                // Group selector: push to every host carrying the tag.
+                if let Some(tag) = remote_hosts::group_tag(&host) {
+                    return remote_cmd::cmd_policy_push_group(tag, &policy, &targets, yes);
+                }
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
+                if let Some(bin) = remote_bin {
+                    std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+                }
+                remote_cmd::cmd_policy_push(&target, &policy, &targets, version, diff, yes)
+            }
+            RemotePolicyAction::Show { host } => {
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
+                if let Some(bin) = remote_bin {
+                    std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+                }
+                remote_cmd::cmd_policy_show(&target)
+            }
+            RemotePolicyAction::Status { host, json } => {
+                let targets = match host {
+                    Some(h) => expand_host_list(&h)?,
+                    None => all_configured_targets()?,
+                };
+                remote_cmd::cmd_policy_status(&targets, json)
+            }
+        },
+        RemoteSubcommand::Audit { action } => match action {
+            RemoteAuditAction::Pull { host, db } => {
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
+                if let Some(bin) = remote_bin {
+                    std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+                }
+                remote_cmd::cmd_audit_pull(&target, db.as_deref())
+            }
+        },
+        RemoteSubcommand::Diag { action } => match action {
+            RemoteDiagAction::Run {
+                hosts,
+                checks,
+                json,
+            } => {
+                // Per-host credentials: each resolved host keeps its own
+                // target/remote-bin/password; diagnose threads apply their
+                // own env, so no password is shared across hosts.
+                let targets: Vec<diagnose::HostTarget> = expand_host_list(&hosts)?
+                    .into_iter()
+                    .map(|(target, remote_bin, password)| diagnose::HostTarget {
+                        target,
+                        remote_bin,
+                        password,
+                    })
+                    .collect();
+                let check_list: Vec<String> = checks
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                remote_cmd::diag_run(&targets, &check_list, json)
+            }
+            RemoteDiagAction::List => remote_cmd::diag_list(),
+            RemoteDiagAction::Status { task, json } => remote_cmd::diag_status(&task, json),
+            RemoteDiagAction::Retry { task, json } => {
+                let saved = diag_tasks::load(&task)?;
+                let hosts = diag_tasks::retry_hosts(&saved);
+                if hosts.is_empty() {
+                    println!("task {task}: all hosts succeeded, nothing to retry");
+                    return Ok(());
+                }
+                println!(
+                    "retrying {} failed host(s) from task {task}: {}",
+                    hosts.len(),
+                    hosts.join(", ")
+                );
+                let targets: Vec<diagnose::HostTarget> = hosts
+                    .iter()
+                    .map(|h| {
+                        remote_hosts::resolve(h).map(|(target, remote_bin, password)| {
+                            diagnose::HostTarget {
+                                target,
+                                remote_bin,
+                                password,
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                remote_cmd::diag_run(&targets, &saved.checks, json)
+            }
+        },
+        RemoteSubcommand::Doctor { host } => {
+            let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
+            if let Some(bin) = remote_bin {
+                std::env::set_var("AISH_REMOTE_BIN", bin);
+            }
+            match password {
+                Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+            }
+            remote_cmd::cmd_remote_doctor(&target)
+        }
+        RemoteSubcommand::Admin { action } => match action {
+            RemoteAdminAction::Keygen => {
+                let pubkey = policy_signing::keygen()?;
+                println!("admin keypair generated.");
+                println!("public key (distribute to target hosts):");
+                println!("  {pubkey}");
+                println!("Tip: on each target host run: aish remote admin add-signer {pubkey}");
+                Ok(())
+            }
+            RemoteAdminAction::ShowKey => {
+                let pubkey = policy_signing::keygen_public_key()?;
+                println!("{pubkey}");
+                Ok(())
+            }
+            RemoteAdminAction::AddSigner { public_key } => {
+                policy_signing::add_signer(&public_key)?;
+                println!("signer registered");
+                Ok(())
+            }
+            RemoteAdminAction::ListSigners => {
+                let signers = policy_signing::list_signers()?;
+                if signers.is_empty() {
+                    println!("No policy signers configured on this host.");
+                    println!("Tip: 'aish remote admin add-signer <public-key-hex>' registers one");
+                } else {
+                    for s in &signers {
+                        println!("  {s}");
+                    }
+                }
+                Ok(())
+            }
+            RemoteAdminAction::ShowIdentity => {
+                let (pubkey, _key) = remote_identity::ensure_identity()?;
+                println!("{pubkey}");
+                Ok(())
+            }
+            RemoteAdminAction::TrustOperator { public_key } => {
+                remote_identity::trust_operator(&public_key)?;
+                println!("operator trusted (identity enforcement is now ACTIVE on this host)");
+                Ok(())
+            }
+            RemoteAdminAction::ListOperators => {
+                let ops = remote_identity::list_trusted()?;
+                if ops.is_empty() {
+                    println!("No trusted operators configured on this host.");
+                    println!("Tip: 'aish remote admin trust-operator <public-key-hex>' registers one and enables identity enforcement");
+                } else {
+                    for k in &ops {
+                        println!("  {k}");
+                    }
+                }
+                Ok(())
+            }
+            RemoteAdminAction::UntrustOperator { public_key } => {
+                if remote_identity::untrust_operator(&public_key)? {
+                    let remaining = remote_identity::list_trusted()?.len();
+                    if remaining == 0 {
+                        println!("operator removed; identity enforcement is now OFF (open mode)");
+                    } else {
+                        println!("operator removed; {remaining} trusted operator(s) remain");
+                    }
+                } else {
+                    println!("operator was not in the trusted list");
+                }
+                Ok(())
+            }
+        },
     }
 }
 
@@ -687,6 +1622,8 @@ fn spawn_pty_daemon(
     while std::time::Instant::now() < deadline {
         if aish_pty::check_daemon_alive(&socket_path) {
             return Ok(aish_pty::DaemonSessionInfo {
+                controller: None,
+                controller_stale: false,
                 session_id,
                 socket_path,
                 daemon_pid: 0, // real pid is in session JSON written by daemon
@@ -1635,6 +2572,22 @@ fn check_langfuse(
 /// socket and passes bytes back and forth. It demonstrates the detach/reattach
 /// lifecycle: exiting this function (via Ctrl+Q) detaches from the daemon
 /// without killing the underlying bash process.
+/// Helper: print a one-line observer-mode hint at the top of the terminal.
+/// Safe to call in raw mode: writes directly to stdout with CRLF line endings.
+fn print_observer_notice(stdout_fd: i32, message: &str) {
+    let msg = if message.is_empty() {
+        "\r\n\x1b[33m[aish] observer mode: input is read-only; the session is controlled by another client.\x1b[0m\r\n"
+            .to_string()
+    } else {
+        format!("\r\n\x1b[33m[aish] observer mode: {}\x1b[0m\r\n", message)
+    };
+    // SAFETY: [Category 8 — FFI] write() to stdout (valid fd); buffer valid
+    // for the duration of the call.
+    unsafe {
+        libc::write(stdout_fd, msg.as_ptr() as *const _, msg.len());
+    }
+}
+
 fn run_pty_raw_attach(
     socket_path: &str,
     session_id: &str,
@@ -1728,6 +2681,11 @@ fn run_pty_raw_attach(
                 aish_pty::PtyEvent::Control(evt) => {
                     if matches!(evt, aish_pty::BackendControlEvent::ShellExiting { .. }) {
                         initial_exit = true;
+                    }
+                }
+                aish_pty::PtyEvent::RoleNotice(role, message) => {
+                    if role == aish_pty::daemon_protocol::ClientRole::Observer {
+                        print_observer_notice(stdout_fd, &message);
                     }
                 }
             }
@@ -1887,6 +2845,11 @@ fn run_pty_raw_attach(
                                 {
                                     should_exit = true;
                                     shell_exited = true;
+                                }
+                            }
+                            aish_pty::PtyEvent::RoleNotice(role, message) => {
+                                if role == aish_pty::daemon_protocol::ClientRole::Observer {
+                                    print_observer_notice(stdout_fd, &message);
                                 }
                             }
                         }
@@ -2285,6 +3248,8 @@ mod tests {
 
     fn session(id: &str, started_at: u64) -> aish_pty::DaemonSessionInfo {
         aish_pty::DaemonSessionInfo {
+            controller: None,
+            controller_stale: false,
             session_id: id.to_string(),
             socket_path: std::path::PathBuf::from(format!("/tmp/{id}.sock")),
             daemon_pid: 1,

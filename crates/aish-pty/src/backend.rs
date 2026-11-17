@@ -16,6 +16,8 @@ pub enum PtyEvent {
     Output(Vec<u8>),
     /// Decoded control event from bash (PromptReady, ShellExiting, etc.).
     Control(BackendControlEvent),
+    /// Role arbitration notification from the daemon (controller/observer).
+    RoleNotice(crate::daemon_protocol::ClientRole, String),
 }
 
 /// Abstraction over PTY I/O for both direct ownership and daemon-attached modes.
@@ -165,7 +167,7 @@ use std::time::{Duration, Instant};
 use crate::daemon_protocol::{
     encode_frame, AttachRequest, Frame, FrameReader, MAX_FRAME_PAYLOAD, PROTOCOL_VERSION,
     TYPE_ATTACH_ACK, TYPE_CONTROL_EVENT, TYPE_DAEMON_ERROR, TYPE_EXIT_NOTICE, TYPE_PTY_OUTPUT,
-    TYPE_SCROLLBACK, TYPE_SCROLLBACK_END, TYPE_SESSION_INFO,
+    TYPE_ROLE_NOTIFY, TYPE_SCROLLBACK, TYPE_SCROLLBACK_END, TYPE_SESSION_INFO,
 };
 
 /// Default deadline for the whole attach handshake (attach + scrollback replay).
@@ -250,7 +252,8 @@ impl AttachedBackend {
             }
 
             let frames = reader.drain_frames()?;
-            for frame in frames {
+            let mut frames_iter = frames.into_iter();
+            while let Some(frame) = frames_iter.next() {
                 match frame.frame_type {
                     TYPE_ATTACH_ACK => match frame.as_attach_ack() {
                         Ok(ack) => tracing::debug!(
@@ -284,6 +287,31 @@ impl AttachedBackend {
                         })?;
                         let child_pid = end.child_pid;
                         let running = end.running;
+                        // The daemon may queue role frames in the same flush
+                        // batch, right after ScrollbackEnd. Those frames are
+                        // already decoded here; returning immediately would
+                        // discard them. Surface the remainder as events.
+                        for frame in frames_iter {
+                            match frame.frame_type {
+                                TYPE_ROLE_NOTIFY => match frame.as_role_notify() {
+                                    Ok(notify) => pending_events
+                                        .push(PtyEvent::RoleNotice(notify.role, notify.message)),
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "malformed role notify frame")
+                                    }
+                                },
+                                TYPE_PTY_OUTPUT | TYPE_SCROLLBACK if !frame.payload.is_empty() => {
+                                    pending_events.push(PtyEvent::Output(frame.payload));
+                                }
+                                TYPE_CONTROL_EVENT => match frame.as_control_event() {
+                                    Ok(evt) => pending_events.push(PtyEvent::Control(evt)),
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "malformed control event frame")
+                                    }
+                                },
+                                _ => {}
+                            }
+                        }
                         tracing::info!(
                             child_pid,
                             running,
@@ -430,6 +458,10 @@ impl PtyBackend for AttachedBackend {
                         "daemon error frame"
                     ),
                     Err(e) => tracing::warn!(error = %e, "malformed DaemonError frame"),
+                },
+                TYPE_ROLE_NOTIFY => match frame.as_role_notify() {
+                    Ok(notify) => events.push(PtyEvent::RoleNotice(notify.role, notify.message)),
+                    Err(e) => tracing::warn!(error = %e, "malformed role notify frame"),
                 },
                 TYPE_ATTACH_ACK | TYPE_SCROLLBACK_END => {
                     // Handshake frames must not arrive in live mode.

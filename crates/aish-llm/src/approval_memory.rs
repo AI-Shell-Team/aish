@@ -37,6 +37,9 @@ pub enum ApprovalChoice {
 /// to normalize themselves.
 #[derive(Debug, Default)]
 pub struct ApprovalMemory {
+    /// Fingerprint of the installed security policy when approvals were
+    /// last remembered. A policy change invalidates all remembered choices.
+    pub policy_fingerprint: Option<String>,
     allowed: HashSet<(String, String)>,
     allowed_targets: HashSet<(String, String)>,
 }

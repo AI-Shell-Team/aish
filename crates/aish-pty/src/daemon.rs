@@ -22,8 +22,9 @@ use libc::{self, c_int};
 use nix::unistd::Pid;
 
 use crate::daemon_protocol::{
-    AttachAck, AttachRequest, Frame, FrameReader, ScrollbackEnd, PROTOCOL_VERSION, TYPE_ATTACH,
-    TYPE_DETACH, TYPE_INPUT, TYPE_KILL_SESSION, TYPE_RESIZE, TYPE_SCROLLBACK,
+    AttachAck, AttachRequest, ClientRole, Frame, FrameReader, RoleNotify, ScrollbackEnd,
+    TakeoverRequest, PROTOCOL_VERSION, TYPE_ATTACH, TYPE_CLAIM_INPUT, TYPE_DETACH, TYPE_INPUT,
+    TYPE_KILL_SESSION, TYPE_RELEASE_INPUT, TYPE_RESIZE, TYPE_SCROLLBACK, TYPE_TAKEOVER_CONFIRM,
 };
 use crate::scrollback::ScrollbackBuffer;
 
@@ -316,6 +317,211 @@ fn strip_osc_5151(data: &[u8]) -> Vec<u8> {
 // Client connection state
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Input arbitration (#586 session takeover)
+// ---------------------------------------------------------------------------
+
+/// Pure role-arbitration state machine. Maps client fds (stable per
+/// connection, unlike Vec indices) to roles and drives takeover handshakes.
+/// Kept free of I/O so the state transitions are unit-testable.
+struct RoleArbiter {
+    roles: std::collections::HashMap<RawFd, ClientRoleState>,
+    /// (request_id, requester fd) of an in-flight takeover request.
+    pending: Option<(String, RawFd)>,
+    pending_deadline: Option<std::time::Instant>,
+    next_request_id: u64,
+}
+
+/// Result of a CLAIM_INPUT handled by the arbiter.
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimDecision {
+    /// Requester is already controller (or invalid): nothing to do.
+    Ignore,
+    /// Granted immediately (no live controller).
+    Granted,
+    /// Forwarded to the current controller; awaiting TAKEOVER_CONFIRM.
+    Forwarded { request_id: String },
+}
+
+/// Result of a TAKEOVER_CONFIRM handled by the arbiter.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfirmDecision {
+    /// No matching pending request or non-controller sender: ignore.
+    Ignore,
+    /// Approved: requester becomes controller, old controller demoted.
+    Approved { requester: RawFd },
+    /// Denied: pending request dropped, roles unchanged.
+    Denied { requester: RawFd },
+}
+
+/// Result of a client disconnect handled by the arbiter.
+#[derive(Debug, PartialEq, Eq)]
+enum DisconnectDecision {
+    /// No role impact.
+    None,
+    /// The controller disconnected: role marked stale, transferred on next claim.
+    ControllerStale,
+    /// A pending takeover requester disconnected: drop the pending request.
+    DropPending,
+}
+
+impl RoleArbiter {
+    fn new() -> Self {
+        Self {
+            roles: std::collections::HashMap::new(),
+            pending: None,
+            pending_deadline: None,
+            next_request_id: 0,
+        }
+    }
+
+    fn role_of(&self, fd: RawFd) -> ClientRoleState {
+        self.roles
+            .get(&fd)
+            .copied()
+            .unwrap_or(ClientRoleState::Observer)
+    }
+
+    /// Whether a stale (disconnected) controller slot exists.
+    fn has_stale(&self) -> bool {
+        self.roles.values().any(|r| *r == ClientRoleState::Stale)
+    }
+
+    /// fd of the current live controller, if any.
+    fn controller_fd(&self) -> Option<RawFd> {
+        self.roles
+            .iter()
+            .find(|(_, r)| **r == ClientRoleState::Controller)
+            .map(|(fd, _)| *fd)
+    }
+
+    /// A client reached Live state. The first live client without an active
+    /// controller becomes controller (preserves today's single-client
+    /// behaviour); everyone else starts as observer. A stale controller slot
+    /// (disconnected controller) blocks auto-promotion: the role transfers
+    /// only on an explicit CLAIM_INPUT.
+    fn on_client_live(&mut self, fd: RawFd) -> bool {
+        let has_controller = self
+            .roles
+            .values()
+            .any(|r| matches!(r, ClientRoleState::Controller | ClientRoleState::Stale));
+        let role = if has_controller {
+            ClientRoleState::Observer
+        } else {
+            ClientRoleState::Controller
+        };
+        self.roles.insert(fd, role);
+        role == ClientRoleState::Controller
+    }
+
+    fn new_request_id(&mut self) -> String {
+        self.next_request_id += 1;
+        format!("takeover-{}", self.next_request_id)
+    }
+
+    /// Register an fd as observer without auto-promotion. Used for
+    /// newly-live clients that arrive after the controller was promoted in
+    /// the same batch.
+    fn register_observer(&mut self, fd: RawFd) {
+        self.roles.entry(fd).or_insert(ClientRoleState::Observer);
+    }
+
+    /// Handle a CLAIM_INPUT from `fd`.
+    fn handle_claim(&mut self, fd: RawFd) -> ClaimDecision {
+        if self.role_of(fd) == ClientRoleState::Controller {
+            return ClaimDecision::Ignore;
+        }
+        // A live controller exists: park the request and forward it. A stale
+        // slot (disconnected controller) does not count as live, so the claim
+        // transfers immediately without blocking on a confirm.
+        if self.controller_fd().is_some() {
+            if self.pending.is_some() {
+                // A takeover is already pending; ignore until it resolves.
+                return ClaimDecision::Ignore;
+            }
+            let request_id = self.new_request_id();
+            self.pending = Some((request_id.clone(), fd));
+            self.pending_deadline = Some(std::time::Instant::now() + Duration::from_secs(10));
+            return ClaimDecision::Forwarded { request_id };
+        }
+        self.roles.insert(fd, ClientRoleState::Controller);
+        // Demote any stale controller slot so it no longer blocks promotion.
+        for role in self.roles.values_mut() {
+            if *role == ClientRoleState::Stale {
+                *role = ClientRoleState::Observer;
+            }
+        }
+        ClaimDecision::Granted
+    }
+
+    /// Handle a TAKEOVER_CONFIRM from `fd` (must be the current controller).
+    fn handle_confirm(&mut self, fd: RawFd, request_id: &str, approved: bool) -> ConfirmDecision {
+        let Some((pending_id, requester)) = self.pending.clone() else {
+            return ConfirmDecision::Ignore;
+        };
+        if pending_id != request_id || self.role_of(fd) != ClientRoleState::Controller {
+            return ConfirmDecision::Ignore;
+        }
+        self.pending = None;
+        self.pending_deadline = None;
+        if approved {
+            self.roles.insert(fd, ClientRoleState::Observer);
+            self.roles.insert(requester, ClientRoleState::Controller);
+            ConfirmDecision::Approved { requester }
+        } else {
+            ConfirmDecision::Denied { requester }
+        }
+    }
+
+    /// Handle a RELEASE_INPUT from `fd`.
+    fn handle_release(&mut self, fd: RawFd) -> bool {
+        if self.role_of(fd) == ClientRoleState::Controller {
+            self.roles.insert(fd, ClientRoleState::Observer);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Handle a client disconnect (EOF or error).
+    fn on_disconnect(&mut self, fd: RawFd) -> DisconnectDecision {
+        let was_controller = self.role_of(fd) == ClientRoleState::Controller;
+        if let Some((_, requester)) = &self.pending {
+            if *requester == fd {
+                self.pending = None;
+                self.pending_deadline = None;
+                if was_controller {
+                    self.roles.insert(fd, ClientRoleState::Stale);
+                } else {
+                    self.roles.remove(&fd);
+                }
+                return DisconnectDecision::DropPending;
+            }
+        }
+        if was_controller {
+            // Keep the slot marked stale so new clients do not auto-promote;
+            // the role transfers on the next CLAIM_INPUT.
+            self.roles.insert(fd, ClientRoleState::Stale);
+            DisconnectDecision::ControllerStale
+        } else {
+            self.roles.remove(&fd);
+            DisconnectDecision::None
+        }
+    }
+
+    /// Check the pending-request timeout. Returns the requester fd if the
+    /// request expired and should be denied.
+    fn pending_expired(&mut self, now: std::time::Instant) -> Option<RawFd> {
+        let deadline = self.pending_deadline?;
+        if now <= deadline {
+            return None;
+        }
+        let (_, requester) = self.pending.take()?;
+        self.pending_deadline = None;
+        Some(requester)
+    }
+}
+
 /// Lifecycle states for a connected client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientState {
@@ -325,6 +531,17 @@ enum ClientState {
     Replaying,
     /// Fully live — receiving real-time broadcast.
     Live,
+}
+
+/// Role of a client in input arbitration. The controller is the only client
+/// whose INPUT/RESIZE frames reach the PTY; observers only receive output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientRoleState {
+    Observer,
+    Controller,
+    /// Former controller whose socket is gone; the role is released on the
+    /// next CLAIM_INPUT from a live client.
+    Stale,
 }
 
 /// State of a connected client.
@@ -480,6 +697,12 @@ pub struct DaemonSessionInfo {
     pub api_base: Option<String>,
     /// Optional user-defined name for the session.
     pub name: Option<String>,
+    /// Description of the current input controller, if any (set by the
+    /// daemon on role changes; absent in session files predating this).
+    pub controller: Option<String>,
+    /// True when the previous controller disconnected (role transfer is
+    /// pending until a new client claims).
+    pub controller_stale: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -649,7 +872,7 @@ fn write_session_file(info: &DaemonSessionInfo) {
     let path = dir.join(format!("{}.json", info.session_id));
     // SAFETY: [Category 8 — FFI] `getuid()` — see `pty_socket_dir` above.
     let uid = unsafe { libc::getuid() };
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "session_uuid": info.session_id,
         "socket_path": info.socket_path.to_string_lossy(),
         "daemon_pid": info.daemon_pid,
@@ -661,6 +884,14 @@ fn write_session_file(info: &DaemonSessionInfo) {
         "api_base": info.api_base,
         "name": info.name,
     });
+    // Controller fields; updated in place by update_controller_state.
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("controller".to_string(), serde_json::Value::Null);
+        obj.insert(
+            "controller_stale".to_string(),
+            serde_json::Value::Bool(false),
+        );
+    }
     if std::fs::write(
         &path,
         serde_json::to_string_pretty(&json).unwrap_or_default(),
@@ -673,6 +904,58 @@ fn write_session_file(info: &DaemonSessionInfo) {
 }
 
 /// Remove session file on exit.
+/// Best-effort audit trail for role changes. Appends to a per-session
+/// log file in the sessions dir; failures never affect the session.
+fn audit_role_event(session_id: &str, event: &str, detail: &str) {
+    let dir = match pty_session_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let path = dir.join(format!("{session_id}.role-audit.log"));
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{now}\t{event}\t{detail}");
+    }
+}
+
+/// Update the controller fields in the session JSON in place, so remote
+/// list commands can answer "who is in control". Best-effort.
+fn update_controller_state(session_id: &str, controller: Option<&str>, stale: bool) {
+    let dir = match pty_session_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let path = dir.join(format!("{session_id}.json"));
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "controller".to_string(),
+            controller.map(String::from).into(),
+        );
+        obj.insert(
+            "controller_stale".to_string(),
+            serde_json::Value::Bool(stale),
+        );
+    }
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&json).unwrap_or_default(),
+    );
+}
+
 fn remove_session_file(session_id: &str) {
     let dir = match pty_session_dir() {
         Ok(d) => d,
@@ -788,6 +1071,14 @@ pub fn discover_sessions() -> Vec<DaemonSessionInfo> {
                                 .and_then(|v| v.as_str())
                                 .map(String::from),
                             name: json.get("name").and_then(|v| v.as_str()).map(String::from),
+                            controller: json
+                                .get("controller")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                            controller_stale: json
+                                .get("controller_stale")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
                         });
                     } else {
                         // Stale session file, clean up
@@ -978,13 +1269,31 @@ pub fn run_pty_daemon_shell(
                 model: None,
                 api_base: None,
                 name: None,
+                controller: None,
+                controller_stale: false,
             };
             write_session_file(&session_info);
             tracing::info!(session_id, child_pid, "shell daemon started");
 
             let mut scrollback = ScrollbackBuffer::with_default_size();
             let mut clients: Vec<ClientConnection> = Vec::new();
+            let mut arbiter = RoleArbiter::new();
             let mut child_exited = false;
+            // Terminal recording: every PTY output byte lands in the session's
+            // .cast file (asciinema-compatible JSON lines) for replay. Prune
+            // old recordings so disk usage stays bounded (keeps the newest
+            // 20; this session's file was just created, so it survives).
+            // Never prune a live session's recording: this daemon's own
+            // session plus any other running daemon's sessions.
+            let mut active: std::collections::HashSet<String> =
+                [session_id.to_string()].into_iter().collect();
+            for s in crate::discover_sessions() {
+                if crate::check_daemon_alive(&s.socket_path) {
+                    active.insert(s.session_id);
+                }
+            }
+            crate::session_recording::prune_recordings(20, &active);
+            let mut recorder = crate::session_recording::SessionRecorder::start(session_id);
 
             loop {
                 let sigchld_fd = sigchld.read_fd();
@@ -1000,6 +1309,7 @@ pub fn run_pty_daemon_shell(
                 }
 
                 let timeout = Duration::from_millis(50);
+                let mut newly_live: Vec<RawFd> = Vec::new();
                 match select_multi(&read_fds, &write_fds, Some(timeout)) {
                     Ok(SelectResult {
                         readable, writable, ..
@@ -1022,6 +1332,10 @@ pub fn run_pty_daemon_shell(
                                     }
                                     Ok(n) => {
                                         let data = &buf[..n];
+                                        // Terminal recording (before any
+                                        // broadcast so recording never sees
+                                        // client-induced backpressure).
+                                        recorder.record_output(data);
                                         // Forward raw bytes to live clients (the
                                         // outer client needs OSC 5151 to detect
                                         // session switches).
@@ -1095,63 +1409,109 @@ pub fn run_pty_daemon_shell(
                                                     session_id,
                                                     cwd,
                                                     child_exited,
+                                                    &arbiter,
                                                 );
                                             }
                                             continue;
                                         }
                                         match frame.frame_type {
-                                            TYPE_INPUT => {
-                                                // Write to PTY master, retry on EAGAIN
-                                                let data = &frame.payload;
-                                                let mut written = 0;
-                                                while written < data.len() {
-                                                    // SAFETY: [Category 8 — FFI]
-                                                    // `write(master_pty, …)` forwards
-                                                    // user input to the PTY. `master_pty`
-                                                    // is a valid open fd. The slice
-                                                    // `data[written..]` is valid (written
-                                                    // <= data.len, checked by the while
-                                                    // condition). On EAGAIN we retry
-                                                    // after a brief sleep; on real error
-                                                    // we log and drop the remaining data.
-                                                    let n = unsafe {
-                                                        libc::write(
-                                                            master_pty,
-                                                            data[written..].as_ptr() as *const _,
-                                                            data.len() - written,
-                                                        )
-                                                    };
-                                                    if n < 0 {
-                                                        let err = std::io::Error::last_os_error();
-                                                        if err.kind()
-                                                            == std::io::ErrorKind::WouldBlock
-                                                        {
-                                                            // PTY buffer full, wait briefly and retry
-                                                            std::thread::sleep(
-                                                                Duration::from_millis(1),
+                                            TYPE_INPUT
+                                                // Only the controller's keystrokes
+                                                // reach the PTY; observers are
+                                                // silently dropped.
+                                                if arbiter.role_of(clients[i].fd())
+                                                    == ClientRoleState::Controller
+                                                => {
+                                                    // Write to PTY master, retry on EAGAIN
+                                                    let data = &frame.payload;
+                                                    let mut written = 0;
+                                                    while written < data.len() {
+                                                        // SAFETY: [Category 8 — FFI]
+                                                        // `write(master_pty, …)` forwards
+                                                        // user input to the PTY. `master_pty`
+                                                        // is a valid open fd. The slice
+                                                        // `data[written..]` is valid (written
+                                                        // <= data.len, checked by the while
+                                                        // condition). On EAGAIN we retry
+                                                        // after a brief sleep; on real error
+                                                        // we log and drop the remaining data.
+                                                        let n = unsafe {
+                                                            libc::write(
+                                                                master_pty,
+                                                                data[written..].as_ptr()
+                                                                    as *const _,
+                                                                data.len() - written,
+                                                            )
+                                                        };
+                                                        if n < 0 {
+                                                            let err =
+                                                                std::io::Error::last_os_error();
+                                                            if err.kind()
+                                                                == std::io::ErrorKind::WouldBlock
+                                                            {
+                                                                // PTY buffer full, wait briefly and retry
+                                                                std::thread::sleep(
+                                                                    Duration::from_millis(1),
+                                                                );
+                                                                continue;
+                                                            }
+                                                            if err.kind()
+                                                                == std::io::ErrorKind::Interrupted
+                                                            {
+                                                                continue;
+                                                            }
+                                                            // Real error, drop remaining data
+                                                            tracing::warn!(
+                                                                "PTY write error: {}",
+                                                                err
                                                             );
-                                                            continue;
+                                                            break;
                                                         }
-                                                        if err.kind()
-                                                            == std::io::ErrorKind::Interrupted
-                                                        {
-                                                            continue;
-                                                        }
-                                                        // Real error, drop remaining data
-                                                        tracing::warn!("PTY write error: {}", err);
-                                                        break;
+                                                        written += n as usize;
                                                     }
-                                                    written += n as usize;
                                                 }
-                                            }
-                                            TYPE_RESIZE => {
-                                                if let Ok(r) = frame.as_resize_request() {
-                                                    clients[i].rows = r.rows;
-                                                    clients[i].cols = r.cols;
-                                                    do_resize(master_pty, r.rows, r.cols);
+                                            TYPE_RESIZE
+                                                // Resizes are only honoured from
+                                                // the controller.
+                                                if arbiter.role_of(clients[i].fd())
+                                                    == ClientRoleState::Controller
+                                                => {
+                                                    if let Ok(r) = frame.as_resize_request() {
+                                                        clients[i].rows = r.rows;
+                                                        clients[i].cols = r.cols;
+                                                        do_resize(master_pty, r.rows, r.cols);
+                                                    }
                                                 }
-                                            }
                                             TYPE_DETACH => remove = true,
+                                            TYPE_CLAIM_INPUT => {
+                                                handle_claim_input(&mut arbiter, &mut clients, i, session_id);
+                                            }
+                                            TYPE_RELEASE_INPUT => {
+                                                let fd = clients[i].fd();
+                                                if arbiter.handle_release(fd) {
+                                                    broadcast_role_notify(&mut clients, &arbiter, session_id);
+                                                }
+                                            }
+                                            TYPE_TAKEOVER_CONFIRM => {
+                                                if let Ok(c) = frame.as_takeover_confirm() {
+                                                    let fd = clients[i].fd();
+                                                    match arbiter.handle_confirm(
+                                                        fd,
+                                                        &c.request_id,
+                                                        c.approved,
+                                                    ) {
+                                                        ConfirmDecision::Ignore => {}
+                                                        ConfirmDecision::Approved { .. }
+                                                        | ConfirmDecision::Denied { .. } => {
+                                                            broadcast_role_notify(
+                                                                &mut clients,
+                                                                &arbiter,
+                                                                session_id,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             TYPE_KILL_SESSION => {
                                                 // Kill the whole worker tree, not
                                                 // just the direct child (see the
@@ -1170,8 +1530,15 @@ pub fn run_pty_daemon_shell(
                                 let _ = clients[i].do_write();
                             }
                             if remove {
+                                let fd = clients[i].fd();
+                                arbiter.on_disconnect(fd);
                                 to_remove.push(i);
                             }
+                        }
+                        // A disconnect can change the controller state
+                        // (controller → stale); keep the sidecar current.
+                        if !to_remove.is_empty() {
+                            broadcast_role_notify(&mut clients, &arbiter, session_id);
                         }
                         for i in to_remove {
                             let r = clients.swap_remove(i);
@@ -1188,9 +1555,22 @@ pub fn run_pty_daemon_shell(
                             if clients[i].state == ClientState::Handshaking {
                                 if let Some(dl) = clients[i].handshake_deadline {
                                     if now > dl {
+                                        let fd = clients[i].fd();
+                                        arbiter.on_disconnect(fd);
                                         clients.swap_remove(i);
                                     }
                                 }
+                            }
+                        }
+
+                        // Timeout pending takeover requests (auto-deny).
+                        if let Some(requester_fd) = arbiter.pending_expired(now) {
+                            if let Some(c) = clients.iter_mut().find(|c| c.fd() == requester_fd) {
+                                let notify = RoleNotify {
+                                    role: ClientRole::Observer,
+                                    message: "takeover denied".to_string(),
+                                };
+                                c.queue_frame(&Frame::role_notify(&notify));
                             }
                         }
 
@@ -1216,8 +1596,54 @@ pub fn run_pty_daemon_shell(
                         }
                         if client.scrollback_queue.is_empty() {
                             client.state = ClientState::Live;
+                            newly_live.push(client.fd());
                         }
                     }
+                }
+                // Role promotion: only clients that just reached Live state are
+                // considered (calling on_client_live repeatedly would re-insert
+                // and oscillate the role every loop iteration). The first
+                // newly-live client without an existing controller/stale slot
+                // becomes controller.
+                if !newly_live.is_empty() {
+                    let mut promoted = false;
+                    for fd in newly_live.drain(..) {
+                        if promoted {
+                            // Still register the role so later claims/notify
+                            // see a consistent map, and tell the client it is
+                            // an observer.
+                            arbiter.register_observer(fd);
+                            if let Some(c) = clients.iter_mut().find(|c| c.fd() == fd) {
+                                let notify = RoleNotify {
+                                    role: ClientRole::Observer,
+                                    message: String::new(),
+                                };
+                                c.queue_frame(&Frame::role_notify(&notify));
+                            }
+                            continue;
+                        }
+                        if arbiter.on_client_live(fd) {
+                            promoted = true;
+                            if let Some(c) = clients.iter_mut().find(|c| c.fd() == fd) {
+                                let notify = RoleNotify {
+                                    role: ClientRole::Controller,
+                                    message: String::new(),
+                                };
+                                c.queue_frame(&Frame::role_notify(&notify));
+                            }
+                        } else {
+                            // An existing controller holds the role; this
+                            // client starts as an observer — tell it.
+                            if let Some(c) = clients.iter_mut().find(|c| c.fd() == fd) {
+                                let notify = RoleNotify {
+                                    role: ClientRole::Observer,
+                                    message: String::new(),
+                                };
+                                c.queue_frame(&Frame::role_notify(&notify));
+                            }
+                        }
+                    }
+                    broadcast_role_notify(&mut clients, &arbiter, session_id);
                 }
 
                 if child_exited {
@@ -1252,6 +1678,72 @@ pub fn run_pty_daemon_shell(
     }
 }
 
+/// Helper: handle a CLAIM_INPUT frame from client `i`.
+///
+/// - Controller claiming again: ignore.
+/// - No live controller (stale slot): immediate transfer.
+/// - Live controller: forward a TAKEOVER_REQUEST and park the request.
+fn handle_claim_input(
+    arbiter: &mut RoleArbiter,
+    clients: &mut [ClientConnection],
+    i: usize,
+    session_id: &str,
+) {
+    let fd = clients[i].fd();
+    match arbiter.handle_claim(fd) {
+        ClaimDecision::Ignore => {}
+        ClaimDecision::Granted => {
+            broadcast_role_notify(clients, arbiter, session_id);
+        }
+        ClaimDecision::Forwarded { request_id } => {
+            let req = TakeoverRequest {
+                request_id,
+                client_description: "new client".to_string(),
+            };
+            if let Some(controller_fd) = arbiter.controller_fd() {
+                if let Some(c) = clients.iter_mut().find(|c| c.fd() == controller_fd) {
+                    c.queue_frame(&Frame::takeover_request(&req));
+                }
+            }
+        }
+    }
+}
+
+/// Helper: send each live client a ROLE_NOTIFY with its current role.
+fn broadcast_role_notify(
+    clients: &mut [ClientConnection],
+    arbiter: &RoleArbiter,
+    session_id: &str,
+) {
+    // Keep the session's controller-state sidecar and audit trail in sync.
+    let controller_desc = arbiter
+        .controller_fd()
+        .map(|_| format!("uid={}", unsafe { libc::getuid() }));
+    audit_role_event(
+        session_id,
+        "role_change",
+        &match controller_desc.as_deref() {
+            Some(c) => format!("controller={c}"),
+            None => "controller=none".to_string(),
+        },
+    );
+    update_controller_state(session_id, controller_desc.as_deref(), arbiter.has_stale());
+    for client in clients.iter_mut() {
+        if client.state != ClientState::Live {
+            continue;
+        }
+        let role = match arbiter.role_of(client.fd()) {
+            ClientRoleState::Controller => ClientRole::Controller,
+            ClientRoleState::Observer | ClientRoleState::Stale => ClientRole::Observer,
+        };
+        let notify = RoleNotify {
+            role,
+            message: String::new(),
+        };
+        client.queue_frame(&Frame::role_notify(&notify));
+    }
+}
+
 /// Helper: parse AttachRequest from a frame.
 fn req_from_frame(frame: &Frame) -> AttachRequest {
     frame.as_attach_request().unwrap_or(AttachRequest {
@@ -1264,6 +1756,14 @@ fn req_from_frame(frame: &Frame) -> AttachRequest {
 }
 
 /// Helper: complete handshake for shell daemon clients.
+///
+/// Resize guard (review fix): the role is only assigned after the
+/// scrollback replay finishes, so at handshake time the client is not yet
+/// the controller. Resizing the shared PTY here would let a small-window
+/// observer shrink the current controller's terminal. The PTY is resized
+/// later by the controller's own control events (TYPE_RESIZE is
+/// controller-gated); for the very first attach (no controller yet) the
+/// PTY keeps its spawn size until the first controller resizes.
 fn shell_daemon_handshake(
     client: &mut ClientConnection,
     scrollback: &ScrollbackBuffer,
@@ -1273,11 +1773,16 @@ fn shell_daemon_handshake(
     session_id: &str,
     cwd: &str,
     running: bool,
+    arbiter: &RoleArbiter,
 ) {
     client.rows = req.rows;
     client.cols = req.cols;
     client.session_id = Some(req.session_id.clone());
-    do_resize(master_pty, req.rows, req.cols);
+    // No controller yet: this attach will become the controller once the
+    // scrollback replay finishes, so its dimensions define the PTY size.
+    if arbiter.controller_fd().is_none() {
+        do_resize(master_pty, req.rows, req.cols);
+    }
 
     let ack = AttachAck {
         protocol_version: PROTOCOL_VERSION,
@@ -1404,5 +1909,183 @@ mod tests {
         let data = format!("prompt$ \x1b]5151;switch:{}\x07", "abc12345").into_bytes();
         let result = strip_osc_5151(&data);
         assert_eq!(result, b"prompt$ ");
+    }
+}
+
+#[cfg(test)]
+mod takeover_tests {
+    use super::*;
+    use crate::daemon_protocol::{TakeoverConfirm, TYPE_ROLE_NOTIFY, TYPE_TAKEOVER_REQUEST};
+
+    const FD_A: RawFd = 10;
+    const FD_B: RawFd = 11;
+
+    #[test]
+    fn first_live_client_becomes_controller() {
+        let mut a = RoleArbiter::new();
+        assert!(a.on_client_live(FD_A));
+        assert_eq!(a.role_of(FD_A), ClientRoleState::Controller);
+    }
+
+    #[test]
+    fn second_live_client_becomes_observer() {
+        let mut a = RoleArbiter::new();
+        assert!(a.on_client_live(FD_A));
+        assert!(!a.on_client_live(FD_B));
+        assert_eq!(a.role_of(FD_B), ClientRoleState::Observer);
+    }
+
+    #[test]
+    fn claim_with_live_controller_is_forwarded() {
+        let mut a = RoleArbiter::new();
+        a.on_client_live(FD_A);
+        a.on_client_live(FD_B);
+        match a.handle_claim(FD_B) {
+            ClaimDecision::Forwarded { request_id } => {
+                // Confirm from the controller approves the transfer.
+                match a.handle_confirm(FD_A, &request_id, true) {
+                    ConfirmDecision::Approved { requester } => {
+                        assert_eq!(requester, FD_B);
+                        assert_eq!(a.role_of(FD_B), ClientRoleState::Controller);
+                        assert_eq!(a.role_of(FD_A), ClientRoleState::Observer);
+                    }
+                    other => panic!("expected approved, got {other:?}"),
+                }
+            }
+            other => panic!("expected forwarded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_denied_keeps_roles() {
+        let mut a = RoleArbiter::new();
+        a.on_client_live(FD_A);
+        a.on_client_live(FD_B);
+        let ClaimDecision::Forwarded { request_id } = a.handle_claim(FD_B) else {
+            panic!("expected forwarded");
+        };
+        assert_eq!(
+            a.handle_confirm(FD_A, &request_id, false),
+            ConfirmDecision::Denied { requester: FD_B }
+        );
+        assert_eq!(a.role_of(FD_A), ClientRoleState::Controller);
+        assert_eq!(a.role_of(FD_B), ClientRoleState::Observer);
+    }
+
+    #[test]
+    fn controller_claim_is_ignored() {
+        let mut a = RoleArbiter::new();
+        a.on_client_live(FD_A);
+        assert_eq!(a.handle_claim(FD_A), ClaimDecision::Ignore);
+    }
+
+    #[test]
+    fn controller_disconnect_marks_stale_and_next_claim_takes_over() {
+        let mut a = RoleArbiter::new();
+        a.on_client_live(FD_A);
+        a.on_client_live(FD_B);
+        assert_eq!(a.on_disconnect(FD_A), DisconnectDecision::ControllerStale);
+        // Stale slot blocks auto-promotion for a new client.
+        const FD_C: RawFd = 12;
+        assert!(!a.on_client_live(FD_C));
+        // An explicit claim transfers immediately: the stale slot is
+        // consumed (Granted, no takeover handshake needed).
+        assert_eq!(a.handle_claim(FD_C), ClaimDecision::Granted);
+        assert_eq!(a.role_of(FD_C), ClientRoleState::Controller);
+        // The stale slot is demoted so it no longer blocks anything.
+        assert_eq!(a.role_of(FD_A), ClientRoleState::Observer);
+    }
+
+    #[test]
+    fn observer_disconnect_cleans_up() {
+        let mut a = RoleArbiter::new();
+        a.on_client_live(FD_A);
+        a.on_client_live(FD_B);
+        assert_eq!(a.on_disconnect(FD_B), DisconnectDecision::None);
+        assert_eq!(a.role_of(FD_A), ClientRoleState::Controller);
+    }
+
+    #[test]
+    fn pending_requester_disconnect_drops_request() {
+        let mut a = RoleArbiter::new();
+        a.on_client_live(FD_A);
+        a.on_client_live(FD_B);
+        let _ = a.handle_claim(FD_B);
+        assert_eq!(a.on_disconnect(FD_B), DisconnectDecision::DropPending);
+        // The dropped request can no longer be confirmed.
+        assert_eq!(
+            a.handle_confirm(FD_A, "takeover-1", true),
+            ConfirmDecision::Ignore
+        );
+    }
+
+    #[test]
+    fn pending_request_expires_after_timeout() {
+        let mut a = RoleArbiter::new();
+        a.on_client_live(FD_A);
+        a.on_client_live(FD_B);
+        let _ = a.handle_claim(FD_B);
+        let before = std::time::Instant::now();
+        assert_eq!(a.pending_expired(before), None);
+        let after = std::time::Instant::now() + Duration::from_secs(11);
+        assert_eq!(a.pending_expired(after), Some(FD_B));
+        // After expiry the confirm no longer matches.
+        assert_eq!(
+            a.handle_confirm(FD_A, "takeover-1", true),
+            ConfirmDecision::Ignore
+        );
+    }
+
+    #[test]
+    fn release_input_demotes_controller() {
+        let mut a = RoleArbiter::new();
+        a.on_client_live(FD_A);
+        assert!(a.handle_release(FD_A));
+        assert_eq!(a.role_of(FD_A), ClientRoleState::Observer);
+        // Next client can now claim/auto-promote.
+        assert!(a.on_client_live(FD_B));
+    }
+
+    #[test]
+    fn takeover_confirm_frame_roundtrip() {
+        let confirm = TakeoverConfirm {
+            request_id: "takeover-7".to_string(),
+            approved: true,
+        };
+        let frame = Frame::takeover_confirm(&confirm);
+        assert_eq!(frame.frame_type, TYPE_TAKEOVER_CONFIRM);
+        assert_eq!(frame.as_takeover_confirm().unwrap(), confirm);
+    }
+
+    #[test]
+    fn role_notify_frame_roundtrip() {
+        let notify = RoleNotify {
+            role: ClientRole::Observer,
+            message: "takeover denied".to_string(),
+        };
+        let frame = Frame::role_notify(&notify);
+        assert_eq!(frame.frame_type, TYPE_ROLE_NOTIFY);
+        assert_eq!(frame.as_role_notify().unwrap(), notify);
+    }
+
+    #[test]
+    fn takeover_request_frame_roundtrip() {
+        let req = TakeoverRequest {
+            request_id: "takeover-1".to_string(),
+            client_description: "new client".to_string(),
+        };
+        let frame = Frame::takeover_request(&req);
+        assert_eq!(frame.frame_type, TYPE_TAKEOVER_REQUEST);
+        assert_eq!(frame.as_takeover_request().unwrap(), req);
+    }
+
+    #[test]
+    fn claim_and_release_frames_are_empty() {
+        let claim = Frame::claim_input();
+        assert_eq!(claim.frame_type, TYPE_CLAIM_INPUT);
+        assert!(claim.payload.is_empty());
+        let release = Frame::release_input();
+        assert_eq!(release.frame_type, TYPE_RELEASE_INPUT);
+        assert!(release.payload.is_empty());
     }
 }

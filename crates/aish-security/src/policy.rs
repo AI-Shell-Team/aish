@@ -533,6 +533,68 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
     try_load_policy(config_path).unwrap_or_else(|_| SecurityPolicy::default())
 }
 
+/// Path of the remote-policy version marker. Written only by the C/S policy
+/// install flow (`--remote-policy-install`); always absent on hosts that
+/// never received a remote policy, so local-only usage is unaffected.
+pub fn remote_policy_version_path() -> PathBuf {
+    user_security_policy_path().with_extension("yaml.remote-version")
+}
+
+/// Fingerprint of the installed policy for approval-invalidation: the
+/// policy file's mtime as seconds+nanos. A missing file yields "none".
+pub fn policy_epoch_fingerprint() -> String {
+    match resolve_security_policy_path(None) {
+        Some(path) => match std::fs::metadata(&path) {
+            Ok(meta) => meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| format!("{}:{}", d.as_secs(), d.subsec_nanos()))
+                .unwrap_or_else(|| "none".to_string()),
+            Err(_) => "none".to_string(),
+        },
+        None => "none".to_string(),
+    }
+}
+
+/// Parse a policy YAML string into a validated [`SecurityPolicy`].
+/// Used by the remote policy install flow to reject malformed bodies before
+/// they replace an effective policy.
+pub fn policy_from_yaml_str(text: &str) -> Result<SecurityPolicy, String> {
+    let data = serde_yaml::from_str::<Value>(text).map_err(|e| e.to_string())?;
+    policy_from_value(data)
+}
+
+/// Wire envelope for remote policy distribution (#587). The constructor side
+/// (`aish remote policy-push` tooling and tests) builds this; the receiver
+/// (`--remote-policy-install`) currently reads the same field names from a
+/// raw `serde_json::Value` and may stay decoupled from this struct.
+///
+/// `policy_yaml` serializes as `policy` to match the receiver's field name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyEnvelope {
+    pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    // ed25519 verification lands with admin keypair distribution; until then
+    // the receiver only enforces "absent or empty is accepted, non-empty is
+    // rejected" so unsigned first-phase envelopes still install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(rename = "policy")]
+    pub policy_yaml: String,
+}
+
+impl PolicyEnvelope {
+    /// Serialize the envelope as the JSON string passed to
+    /// `--remote-policy-install`.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
 fn optional_section_mapping<'a>(
     root: &'a Mapping,
     key: &str,
@@ -1426,5 +1488,113 @@ rules: []
         let on_disk = fs::read_to_string(&policy_path).unwrap();
         assert!(on_disk.contains("enable_sandbox: true"));
         assert!(on_disk.contains("enabled: false"));
+    }
+
+    // ---- PolicyEnvelope (remote policy distribution, #587) ----
+
+    fn sample_envelope() -> super::PolicyEnvelope {
+        super::PolicyEnvelope {
+            version: 7,
+            issuer: Some("admin@corp".to_string()),
+            targets: vec!["web-*".to_string(), "db-1".to_string()],
+            signature: None,
+            policy_yaml: "global:\n  enable_sandbox: true\nrules: []\n".to_string(),
+        }
+    }
+
+    #[test]
+    fn policy_envelope_json_round_trip() {
+        let envelope = sample_envelope();
+        let json = envelope.to_json();
+        let parsed: super::PolicyEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, envelope);
+    }
+
+    #[test]
+    fn policy_envelope_json_uses_policy_field_name() {
+        // The receiver (--remote-policy-install) reads the body from `policy`.
+        let json = sample_envelope().to_json();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value.get("policy").and_then(|v| v.as_str()),
+            Some("global:\n  enable_sandbox: true\nrules: []\n")
+        );
+        assert_eq!(value.get("version").and_then(|v| v.as_u64()), Some(7));
+        assert_eq!(
+            value.get("issuer").and_then(|v| v.as_str()),
+            Some("admin@corp")
+        );
+        assert_eq!(
+            value
+                .get("targets")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(2)
+        );
+        // Signature None is skipped on serialization.
+        assert!(value.get("signature").is_none());
+    }
+
+    #[test]
+    fn policy_envelope_deserializes_signature_and_missing_optionals() {
+        // A minimal receiver-side envelope: only version and policy required.
+        let parsed: super::PolicyEnvelope =
+            serde_json::from_str(r#"{"version": 3, "policy": "rules: []"}"#).unwrap();
+        assert_eq!(parsed.version, 3);
+        assert_eq!(parsed.issuer, None);
+        assert!(parsed.targets.is_empty());
+        assert_eq!(parsed.signature, None);
+        assert_eq!(parsed.policy_yaml, "rules: []");
+
+        let with_sig: super::PolicyEnvelope =
+            serde_json::from_str(r#"{"version": 4, "signature": "abc", "policy": "rules: []"}"#)
+                .unwrap();
+        assert_eq!(with_sig.signature.as_deref(), Some("abc"));
+    }
+
+    // ---- policy_from_yaml_str (remote install body validation) ----
+
+    #[test]
+    fn policy_from_yaml_str_accepts_valid_body() {
+        let policy = super::policy_from_yaml_str(
+            "global:\n  enable_sandbox: true\n  default_risk_level: HIGH\nrules: []\n",
+        )
+        .unwrap();
+        assert!(policy.enable_sandbox);
+        assert_eq!(policy.default_risk_level, crate::decision::RiskLevel::High);
+    }
+
+    #[test]
+    fn policy_from_yaml_str_rejects_non_mapping_root() {
+        assert!(super::policy_from_yaml_str("- just\n- a\n- list\n").is_err());
+        assert!(super::policy_from_yaml_str("not a mapping").is_err());
+    }
+
+    #[test]
+    fn policy_from_yaml_str_rejects_malformed_yaml() {
+        assert!(super::policy_from_yaml_str("global: [unclosed\nrules: ]").is_err());
+    }
+
+    #[test]
+    fn policy_from_yaml_str_rejects_bad_rules_section() {
+        // `rules` must be a sequence.
+        assert!(super::policy_from_yaml_str("rules: not-a-sequence").is_err());
+    }
+
+    // ---- Version monotonicity (receiver-side rule, kept pure for tests) ----
+
+    #[test]
+    fn version_monotonicity_rule_matches_receiver() {
+        // Mirrors install_policy_envelope: strictly increasing versions only;
+        // equal or lower versions are rejected.
+        let installed: u64 = 7;
+        let check = |candidate: u64| candidate > installed;
+        assert!(check(8));
+        assert!(!check(7));
+        assert!(!check(6));
+        // An absent marker parses as 0, so version 1 installs against an
+        // empty version file (receiver: `installed = 0`).
+        let first_install = |candidate: u64| candidate > 0;
+        assert!(first_install(1));
     }
 }

@@ -198,6 +198,13 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target x86_64-unknown-linux-musl
 
+      - name: Build arm64 static musl binary (for aarch64 hosts, e.g. UOS Server)
+        if: runner.arch == 'X64'
+        run: |
+          pip install cargo-zigbuild
+          rustup target add aarch64-unknown-linux-musl
+          cargo zigbuild --release --target aarch64-unknown-linux-musl -p aish-cli
+
       - name: Smoke test binary
         run: ./target/x86_64-unknown-linux-musl/release/aish --help
 
@@ -206,6 +213,13 @@ jobs:
         with:
           name: aish-linux-amd64
           path: target/x86_64-unknown-linux-musl/release/aish
+          if-no-files-found: error
+
+      - name: Upload arm64 binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: aish-linux-arm64
+          path: target/aarch64-unknown-linux-musl/release/aish
           if-no-files-found: error
 
   lint-test:
