@@ -91,26 +91,41 @@ impl SshChannel {
         if password.is_some() {
             cmd.arg("-e").arg("ssh"); // -e: read password from SSHPASS env
         }
-        // BatchMode: never prompt for passwords (fail fast instead); the
-        // remote command runs without a TTY so its stdio is a clean frame
-        // channel. ServerAliveInterval detects dead peers quickly.
-        cmd.arg("-o")
-            .arg("BatchMode=yes")
-            .when(accept_new_supported(), |c| {
-                c.arg("-o").arg("StrictHostKeyChecking=accept-new")
-            })
-            .arg("-o")
-            .arg("ServerAliveInterval=10")
-            .arg("-o")
-            .arg("ServerAliveCountMax=3")
-            .arg("--")
-            .arg(host)
-            // ssh joins remote_args with spaces into one remote shell string,
-            // so any argument containing spaces must be shell-quoted here.
-            .args(remote_args.iter().map(|a| shell_quote(a)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+        // Auth policy per credential type (review fix: BatchMode=yes is
+        // incompatible with sshpass — BatchMode suppresses the password
+        // prompt, so sshpass has nothing to inject and password-only hosts
+        // always fail with "Permission denied").
+        //
+        // - key path (no password): BatchMode=yes fails fast instead of
+        //   prompting when no usable key exists.
+        // - password path: cap the prompt count at 1 so a wrong password
+        //   fails quickly; the remote command still runs without a TTY,
+        //   keeping stdio a clean frame channel. ServerAliveInterval
+        //   detects dead peers quickly.
+        match &password {
+            None => {
+                cmd.arg("-o").arg("BatchMode=yes");
+            }
+            Some(_) => {
+                cmd.arg("-o").arg("NumberOfPasswordPrompts=1");
+                cmd.arg("-o").arg("ConnectTimeout=5");
+            }
+        }
+        cmd.when(accept_new_supported(), |c| {
+            c.arg("-o").arg("StrictHostKeyChecking=accept-new")
+        })
+        .arg("-o")
+        .arg("ServerAliveInterval=10")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .arg("--")
+        .arg(host)
+        // ssh joins remote_args with spaces into one remote shell string,
+        // so any argument containing spaces must be shell-quoted here.
+        .args(remote_args.iter().map(|a| shell_quote(a)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
 
         // sshpass -e reads the password from SSHPASS in the child env.
         if let Some(pw) = password {
@@ -334,9 +349,18 @@ pub(crate) fn probe_remote_bin_full(
         if password.is_some() {
             probe_cmd.arg("-e").arg("ssh");
         }
+        // Same auth policy as SshChannel::spawn (review fix): BatchMode
+        // suppresses the password prompt sshpass needs to inject into, so
+        // password hosts use a capped prompt count instead.
+        match &password {
+            None => {
+                probe_cmd.arg("-o").arg("BatchMode=yes");
+            }
+            Some(_) => {
+                probe_cmd.arg("-o").arg("NumberOfPasswordPrompts=1");
+            }
+        }
         let output = probe_cmd
-            .arg("-o")
-            .arg("BatchMode=yes")
             .when(accept_new_supported(), |c| {
                 c.arg("-o").arg("StrictHostKeyChecking=accept-new")
             })
@@ -599,9 +623,17 @@ pub fn cmd_session_replay(host: &str, session: &str, tail: Option<usize>) -> Res
     if let Some(pw) = &password {
         child.arg("-e").arg("ssh").env("SSHPASS", pw);
     }
+    // Same auth policy as SshChannel::spawn (review fix): BatchMode would
+    // suppress the password prompt sshpass injects into.
+    match &password {
+        None => {
+            child.arg("-o").arg("BatchMode=yes");
+        }
+        Some(_) => {
+            child.arg("-o").arg("NumberOfPasswordPrompts=1");
+        }
+    }
     let mut child = child
-        .arg("-o")
-        .arg("BatchMode=yes")
         .when(accept_new_supported(), |c| {
             c.arg("-o").arg("StrictHostKeyChecking=accept-new")
         })
