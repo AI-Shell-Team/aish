@@ -25,13 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - SSH authentication now supports password-only hosts through `sshpass`: set `AISH_REMOTE_PASSWORD` (preferred, never persisted) or `remote host add --password`. Password auth uses `NumberOfPasswordPrompts=1` and `ConnectTimeout=5` so a wrong password fails fast; key auth keeps `BatchMode=yes`.
 - Remote host aliases are validated at `host add` time and reject names that `--host` could not select unambiguously (`@`, `:`, commas, whitespace, leading `-`, or anything that parses as an IP).
-- `AISH_SYSTEM_POLICY_PATH` is honored only in test builds.
+- `AISH_SYSTEM_POLICY_PATH` is honored only in test and debug builds; release builds always use the fixed legacy path, so the override cannot bypass the one-time policy migration.
 
 ### Fixed
 
 - The daemon handshake resizes the shared PTY only on the first attach, so a small-window observer can no longer shrink the Controller's terminal.
 - Policy installation, policy show, signer lookup and operator identity checks fail closed when a policy, signer or trust file exists but cannot be read or parsed, instead of silently degrading to unsigned or open mode.
-- Remote host password resolution now gives the alias entry priority over `AISH_REMOTE_PASSWORD`, matching the documented behavior while a literal `user@host` still reads only the environment variable.
+- `AISH_REMOTE_PASSWORD` now takes priority over a stored alias password when both are set, so a one-off environment credential can override the remembered one; a literal `user@host` reads only the environment variable.
 
 ## [1.0.0] - 2026-11-12
 
