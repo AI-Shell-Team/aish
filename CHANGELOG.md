@@ -7,6 +7,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-17
+
+### Added
+
+- Remote C/S extensions over SSH (issues #586, #587, #588), with no resident service, open port, or firewall change required on the target host. The target side runs one-shot `aish --remote-*` agent entries only when a client connects.
+  - **Session takeover (#586).** `aish remote session list|attach|rename|kill|replay` inspects, joins, renames, terminates and replays sessions on another host. A session has one Controller and any number of Observers; Observer input is dropped inside the daemon rather than trusted from the client, and taking over requires the current Controller's approval (a 10 s timeout denies it). Controller identity and staleness are persisted in session metadata so `session list` can answer "who is typing" without attaching, and every role change is appended to a `<session>.role-audit.log`. Sessions are recorded continuously as asciinema-v2-compatible `.cast` files (non-UTF-8 bytes preserved as `raw_b64`), which `session replay [--tail N]` reads without attaching.
+  - **Signed policy distribution (#587).** `aish remote policy push|show|status` ships policies as ed25519-signed envelopes (`version|issuer|targets|policy|signature`) over ssh stdin. The target enforces hostname-glob targeting, a strictly increasing version, a trusted signer when signers are configured, parseable YAML and a non-envelope body before atomically replacing the policy file; a bad file is rejected with the exact reason. `policy status` reports `current` / `drifted` / `stale` / `none` / `unreachable` per host, and `push --diff` previews the change first. A remote policy install bumps the policy file's mtime fingerprint, which clears remembered command approvals so an old "yes" cannot outlive a stricter policy.
+  - **Fleet diagnostics (#588).** `aish remote diag run|list|status|retry` fans out whitelisted read-only checks (`svc`, `ports`, `logs`, `disk`, `load`) across hosts, capped at 4 concurrent hosts with a 20 s per-host timeout. Each host resolves to `success` / `unreachable` / `denied` / `timeout` / `evidence-insufficient`; failures are listed separately and excluded from conclusions. Runs persist as task IDs under `~/.local/share/aish/diag-tasks/`, and `diag retry` re-runs only the hosts that failed. There is no arbitrary-command path.
+  - **Incremental audit pull.** `aish remote audit pull --host <h>` tracks a per-host cursor and merges only newer events, de-duplicating by `(host, time, type, command)` so repeated pulls neither miss nor double-count events.
+  - **Operator identity and RBAC.** Each aish instance gets an ed25519 operator identity (`~/.config/aish/identity-key.json`, mode 0600); targets can accept operators via `remote admin trust-operator`, and the signed policy's `remote_access.actions.<action>.operators` list restricts actions by public-key prefix. This is independent of ssh credentials, so password and key auth both get the same identity gate. `remote admin keygen|show-key|show-identity|add-signer|list-signers|trust-operator|list-operators|untrust-operator` manages both the policy-signing and operator-trust keyrings.
+  - **Host aliases and groups.** `remote host add|list|remove` stores aliases, group tags, optional remote binary paths and optional passwords in `remote-hosts.json`; every `--host` accepts an alias, a literal `user@host`, or `group:<tag>`.
+- A bundled `remote-fleet-ops` skill, plus `docs/remote-cs-architecture.md` and `docs/remote-cs-testing-guide.md` for operators and maintainers.
+- CI builds and uploads an `aish-linux-arm64` static musl binary with `cargo-zigbuild`, so aarch64 hosts such as UOS Server can run the same artifact on glibc 2.38 without a `GLIBC_2.39` dependency.
+
+### Changed
+
+- SSH authentication now supports password-only hosts through `sshpass`: set `AISH_REMOTE_PASSWORD` (preferred, never persisted) or `remote host add --password`. Password auth uses `NumberOfPasswordPrompts=1` and `ConnectTimeout=5` so a wrong password fails fast; key auth keeps `BatchMode=yes`.
+- Remote host aliases are validated at `host add` time and reject names that `--host` could not select unambiguously (`@`, `:`, commas, whitespace, leading `-`, or anything that parses as an IP).
+- `AISH_SYSTEM_POLICY_PATH` is honored only in test builds.
+
+### Fixed
+
+- The daemon handshake resizes the shared PTY only on the first attach, so a small-window observer can no longer shrink the Controller's terminal.
+- Policy installation, policy show, signer lookup and operator identity checks fail closed when a policy, signer or trust file exists but cannot be read or parsed, instead of silently degrading to unsigned or open mode.
+- Remote host password resolution now gives the alias entry priority over `AISH_REMOTE_PASSWORD`, matching the documented behavior while a literal `user@host` still reads only the environment variable.
+
 ## [1.0.0] - 2026-11-12
 
 ### Changed
