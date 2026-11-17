@@ -19,7 +19,7 @@ concurrency:
 jobs:
   preflight:
     name: Validate release PR context
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
@@ -27,7 +27,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve release PR context
         id: resolve
@@ -38,7 +38,7 @@ jobs:
   release-meta:
     name: Compute release metadata
     needs: preflight
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       tag: ${{ steps.metadata.outputs.tag }}
@@ -46,7 +46,7 @@ jobs:
       release_notes: ${{ steps.metadata.outputs.release_notes }}
     steps:
       - name: Checkout release merge ref
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.preflight.outputs.checkout_ref }}
@@ -77,7 +77,7 @@ jobs:
     needs:
       - preflight
       - release-meta
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ needs.release-meta.outputs.version }}
       tag: ${{ needs.release-meta.outputs.tag }}
@@ -119,15 +119,15 @@ jobs:
         include:
           - arch: amd64
             target: x86_64-unknown-linux-musl
-            runs_on: ubuntu-latest
+            runs_on: ubuntu-26.04
           - arch: arm64
             target: aarch64-unknown-linux-musl
-            runs_on: ubuntu-24.04-arm
+            runs_on: ubuntu-26.04-arm
     runs-on: ${{ matrix.runs_on }}
 
     steps:
       - name: Checkout release merge ref
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
 
@@ -162,7 +162,7 @@ jobs:
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
 
       - name: Upload dry-run artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: release-preparation-aish-linux-${{ matrix.arch }}
           path: artifacts/${{ matrix.arch }}/*
@@ -179,10 +179,10 @@ jobs:
         include:
           - arch: amd64
             target: x86_64-unknown-linux-musl
-            runs_on: ubuntu-latest
+            runs_on: ubuntu-26.04
           - arch: arm64
             target: aarch64-unknown-linux-musl
-            runs_on: ubuntu-24.04-arm
+            runs_on: ubuntu-26.04-arm
     runs-on: ${{ matrix.runs_on }}
 
     steps:
@@ -193,7 +193,7 @@ jobs:
 
       - name: Checkout release merge ref
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
 
@@ -205,7 +205,7 @@ jobs:
 
       - name: Set up Python
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -239,7 +239,7 @@ jobs:
 
       - name: Upload PyPI dry-run artifacts
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: release-preparation-pypi-linux-${{ matrix.arch }}
           path: artifacts/pypi/${{ matrix.arch }}/*
@@ -265,7 +265,7 @@ jobs:
       - dry-run-package-validation
       - dry-run-pypi-validation
       - live-smoke-validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Write final summary
         env:

@@ -31,7 +31,7 @@ runs:
   using: composite
   steps:
     - name: Set up Python for metadata scripts
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.12'
 
@@ -48,7 +48,7 @@ runs:
           --json-file release-metadata.json
 
     - name: Upload release metadata artifacts
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact_prefix }}-${{ steps.metadata.outputs.version }}
         path: |

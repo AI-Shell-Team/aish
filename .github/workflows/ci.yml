@@ -25,7 +25,7 @@ env:
 jobs:
   changes:
     name: Detect changed areas
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       code: ${{ github.event_name == 'pull_request' && steps.filter.outputs.code || steps.default.outputs.code }}
@@ -41,7 +41,7 @@ jobs:
       - name: Classify pull request changes
         id: filter
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           filters: |
             code:
@@ -62,12 +62,12 @@ jobs:
     name: Lint
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Read pinned Rust toolchain
         id: rust_toolchain
@@ -83,7 +83,7 @@ jobs:
           components: clippy,rustfmt
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -107,15 +107,15 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runs_on: ubuntu-latest
+            runs_on: ubuntu-26.04
           - arch: arm64
-            runs_on: ubuntu-24.04-arm
+            runs_on: ubuntu-26.04-arm
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Read pinned Rust toolchain
         id: rust_toolchain
@@ -130,7 +130,7 @@ jobs:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -146,12 +146,12 @@ jobs:
     name: Packaging smoke
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Run packaging release script smoke tests
         run: |
@@ -162,12 +162,12 @@ jobs:
     name: Build smoke (AMD64)
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Read pinned Rust toolchain
         id: rust_toolchain
@@ -186,7 +186,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -209,14 +209,14 @@ jobs:
         run: ./target/x86_64-unknown-linux-musl/release/aish --help
 
       - name: Upload release binary
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: aish-linux-amd64
           path: target/x86_64-unknown-linux-musl/release/aish
           if-no-files-found: error
 
       - name: Upload arm64 binary
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: aish-linux-arm64
           path: target/aarch64-unknown-linux-musl/release/aish
@@ -231,7 +231,7 @@ jobs:
       - test
       - packaging_smoke
       - build_smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
 
     steps:
@@ -258,7 +258,7 @@ jobs:
   build-bundle:
     name: Build bundle
     if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     needs:
       - changes
@@ -266,7 +266,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Read pinned Rust toolchain
         id: rust_toolchain
@@ -285,7 +285,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -307,7 +307,7 @@ jobs:
         run: ./target/x86_64-unknown-linux-musl/release/aish --help
 
       - name: Upload bundle artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: aish-linux-amd64-bundle
           path: |
