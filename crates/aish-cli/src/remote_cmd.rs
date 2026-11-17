@@ -145,10 +145,28 @@ impl SshChannel {
     }
 
     /// Wait for the ssh process to exit, returning its status code.
+    /// Exit code 255 is ssh's own error (auth failure, unreachable host,
+    /// refused connection) — never a remote command outcome.
     pub fn wait(&mut self) -> Result<Option<i32>, String> {
         match self.child.wait() {
             Ok(status) => Ok(status.code()),
             Err(e) => Err(format!("ssh wait failed: {e}")),
+        }
+    }
+
+    /// Wait for exit and map failure to an error. Exit code 255 means ssh
+    /// itself failed (bad credentials, unreachable host); the remote command
+    /// cannot have produced valid output in that case. Non-255 nonzero codes
+    /// come from the remote command and are reported verbatim.
+    pub fn wait_ok(&mut self) -> Result<(), String> {
+        match self.wait()? {
+            None => Err("ssh terminated by signal".to_string()),
+            Some(255) => Err(
+                "ssh connection failed (exit 255: authentication error, host unreachable, or connection refused)"
+                    .to_string(),
+            ),
+            Some(code) if code != 0 => Err(format!("ssh remote command exited with {code}")),
+            Some(_) => Ok(()),
         }
     }
 
@@ -265,7 +283,9 @@ pub(crate) fn ssh_json_lines_with_password(
             timeout.unwrap_or_default()
         ));
     }
-    ch.wait()?;
+    // An empty stdout with a failed ssh (auth rejection, unreachable host)
+    // must surface as an error, not as "no sessions".
+    ch.wait_ok()?;
     Ok(values)
 }
 
@@ -732,7 +752,9 @@ pub fn cmd_policy_push(
     reader
         .read_line(&mut reply_line)
         .map_err(|e| format!("ssh read failed: {e}"))?;
-    let _ = ch.wait();
+    // A failed ssh (auth rejection, unreachable host) yields no reply line;
+    // surface the exit status instead of a misleading "malformed reply".
+    ch.wait_ok()?;
     let reply: serde_json::Value = serde_json::from_str(reply_line.trim())
         .map_err(|e| format!("malformed remote reply: {e}"))?;
     let accepted = reply
@@ -1669,11 +1691,18 @@ fn install_policy_envelope(envelope: &str) -> serde_json::Value {
 
     // Signature gate: if any signer is configured, the signature is
     // mandatory and verified; in unsigned mode, empty signatures are
-    // accepted and non-empty ones rejected.
+    // accepted and non-empty ones rejected. A signers file that exists
+    // but cannot be read or parsed must fail closed (review fix): the
+    // host was configured for signed mode, so an unreadable trust file
+    // must not silently downgrade it to unsigned mode.
     let signature = env.get("signature").and_then(|v| v.as_str()).unwrap_or("");
-    let has_signers = !crate::policy_signing::list_signers()
-        .unwrap_or_default()
-        .is_empty();
+    let has_signers = match crate::policy_signing::list_signers() {
+        Ok(signers) => !signers.is_empty(),
+        Err(reason) => {
+            return serde_json::json!({"accepted": false, "version": version,
+                "reason": format!("cannot verify policy signature: {reason}")});
+        }
+    };
     if has_signers {
         if signature.is_empty() {
             return serde_json::json!({"accepted": false, "version": version,
@@ -2039,7 +2068,7 @@ fn ssh_raw_lines(host: &str, remote_args: &[String]) -> Result<Vec<String>, Stri
         .lines()
         .collect::<Result<Vec<String>, _>>()
         .map_err(|e| format!("ssh read failed: {e}"))?;
-    ch.wait()?;
+    ch.wait_ok()?;
     Ok(lines)
 }
 

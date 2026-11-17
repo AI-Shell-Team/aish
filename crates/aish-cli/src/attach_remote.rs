@@ -136,6 +136,25 @@ fn remote_attach_loop(
                     detached = true;
                     break;
                 }
+                // Ctrl+G (0x07): an observer claims input from the current
+                // controller. The daemon forwards the request; the controller
+                // must confirm (10 s timeout denies). No-op when already the
+                // controller — the daemon ignores self-claims.
+                if bytes.contains(&0x07) {
+                    let enc = aish_pty::daemon_protocol::encode_frame(
+                        &aish_pty::Frame::claim_input(),
+                    );
+                    stdin
+                        .write_all(&enc)
+                        .map_err(|_| "remote connection closed".to_string())?;
+                    stdin.flush().ok();
+                    let hint = b"\r\n[aish] input takeover requested; waiting for the controller to confirm...\r\n";
+                    // SAFETY: [Category 8 — FFI] write() to stdout (valid fd).
+                    unsafe {
+                        libc::write(stdout_fd, hint.as_ptr() as *const _, hint.len());
+                    }
+                    continue;
+                }
                 for chunk in bytes.chunks(aish_pty::MAX_FRAME_PAYLOAD) {
                     let frame = aish_pty::Frame::input(chunk);
                     let encoded = aish_pty::daemon_protocol::encode_frame(&frame);
@@ -186,13 +205,55 @@ fn remote_attach_loop(
                                 // Raw mode: write the hint straight to stdout.
                                 let msg = format!(
                                     "\r\n[aish] observer mode: input is read-only ({}). \
-Use Ctrl+Q to detach, or claim input from the controller.\r\n",
+Press Ctrl+G to request input takeover; Ctrl+Q detaches.\r\n",
                                     notify.message
                                 );
                                 // SAFETY: [Category 8 — FFI] write() to stdout (valid fd).
                                 unsafe {
                                     libc::write(stdout_fd, msg.as_ptr() as *const _, msg.len());
                                 }
+                            }
+                        }
+                    }
+                    aish_pty::daemon_protocol::TYPE_TAKEOVER_REQUEST => {
+                        // This client is the current controller: another
+                        // client wants input. In raw mode there is no line
+                        // editor, so prompt with a single keypress: y = allow,
+                        // anything else denies. The daemon's 10 s timeout
+                        // denies by default, so a non-interactive controller
+                        // (no keypress) stays safe.
+                        if let Ok(req) = frame.as_takeover_request() {
+                            let msg = format!(
+                                "\r\n[aish] client '{}' requests input takeover. Allow? (y/N): ",
+                                req.client_description
+                            );
+                            // SAFETY: [Category 8 — FFI] write() to stdout (valid fd).
+                            unsafe {
+                                libc::write(stdout_fd, msg.as_ptr() as *const _, msg.len());
+                            }
+                            let mut key = [0u8; 1];
+                            // SAFETY: [Category 8 — FFI] read() from stdin (valid fd); raw mode already set.
+                            let n = unsafe { libc::read(stdin_fd, key.as_mut_ptr().cast(), 1) };
+                            let approved = n == 1 && (key[0] == b'y' || key[0] == b'Y');
+                            let confirm = aish_pty::daemon_protocol::TakeoverConfirm {
+                                request_id: req.request_id,
+                                approved,
+                            };
+                            let enc = aish_pty::daemon_protocol::encode_frame(
+                                &aish_pty::daemon_protocol::Frame::takeover_confirm(&confirm),
+                            );
+                            stdin
+                                .write_all(&enc)
+                                .map_err(|_| "remote connection closed".to_string())?;
+                            stdin.flush().ok();
+                            let reply = if approved {
+                                "\r\n[aish] takeover granted; you are now an observer (Ctrl+G to reclaim).\r\n"
+                            } else {
+                                "\r\n[aish] takeover denied.\r\n"
+                            };
+                            // SAFETY: [Category 8 — FFI] write() to stdout (valid fd).
+                            unsafe {
+                                libc::write(stdout_fd, reply.as_ptr() as *const _, reply.len());
                             }
                         }
                     }

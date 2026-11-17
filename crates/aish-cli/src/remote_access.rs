@@ -58,11 +58,21 @@ pub fn authorize_action(policy_yaml: &str, action: &str, operator_key: &str) -> 
     })
 }
 
-/// Load the installed policy YAML from the standard path (empty when none).
-pub fn installed_policy_yaml() -> String {
-    aish_security::writable_security_policy_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .unwrap_or_default()
+/// Load the installed policy YAML from the standard path.
+/// Absent file → Ok(empty string) = no remote policy installed.
+/// Present but unreadable (permissions/IO error) → Err: the caller must
+/// deny, because a policy that exists but cannot be read must not be
+/// treated as "no policy installed" (review fix: fail closed on read errors,
+/// not just on parse errors).
+pub fn installed_policy_yaml() -> Result<String, String> {
+    let Some(path) = aish_security::writable_security_policy_path() else {
+        return Ok(String::new());
+    };
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read installed policy {}: {e}", path.display()))
 }
 
 #[cfg(test)]

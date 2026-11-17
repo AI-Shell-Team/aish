@@ -1409,6 +1409,7 @@ pub fn run_pty_daemon_shell(
                                                     session_id,
                                                     cwd,
                                                     child_exited,
+                                                    &arbiter,
                                                 );
                                             }
                                             continue;
@@ -1755,6 +1756,14 @@ fn req_from_frame(frame: &Frame) -> AttachRequest {
 }
 
 /// Helper: complete handshake for shell daemon clients.
+///
+/// Resize guard (review fix): the role is only assigned after the
+/// scrollback replay finishes, so at handshake time the client is not yet
+/// the controller. Resizing the shared PTY here would let a small-window
+/// observer shrink the current controller's terminal. The PTY is resized
+/// later by the controller's own control events (TYPE_RESIZE is
+/// controller-gated); for the very first attach (no controller yet) the
+/// PTY keeps its spawn size until the first controller resizes.
 fn shell_daemon_handshake(
     client: &mut ClientConnection,
     scrollback: &ScrollbackBuffer,
@@ -1764,11 +1773,16 @@ fn shell_daemon_handshake(
     session_id: &str,
     cwd: &str,
     running: bool,
+    arbiter: &RoleArbiter,
 ) {
     client.rows = req.rows;
     client.cols = req.cols;
     client.session_id = Some(req.session_id.clone());
-    do_resize(master_pty, req.rows, req.cols);
+    // No controller yet: this attach will become the controller once the
+    // scrollback replay finishes, so its dimensions define the PTY size.
+    if arbiter.controller_fd().is_none() {
+        do_resize(master_pty, req.rows, req.cols);
+    }
 
     let ack = AttachAck {
         protocol_version: PROTOCOL_VERSION,

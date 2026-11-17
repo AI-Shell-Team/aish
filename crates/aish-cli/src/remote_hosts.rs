@@ -118,7 +118,10 @@ pub fn resolve(host: &str) -> Result<(String, Option<String>, Option<String>), S
         return Ok((
             entry.target,
             entry.remote_bin,
-            entry.password.or_else(env_password),
+            // Environment wins over the stored credential (matches the
+            // env_password doc): exporting AISH_REMOTE_PASSWORD overrides
+            // the remembered password for one invocation.
+            env_password().or(entry.password),
         ));
     }
     // A dotted name that is not a configured alias is still accepted as a
@@ -146,6 +149,36 @@ pub fn add(
     groups: &[String],
     password: Option<&str>,
 ) -> Result<(), String> {
+    // Alias validation: a name that looks like a literal ssh target can
+    // never be selected again — resolve()'s fast path treats any host
+    // containing '@'/':' or parsing as an IP as a literal ssh target
+    // before alias lookup. Reject those shapes at add time.
+    let name = name.trim();
+    let target = target.trim();
+    if name.is_empty() {
+        return Err("alias name must not be empty".to_string());
+    }
+    if target.is_empty() {
+        return Err("ssh target must not be empty".to_string());
+    }
+    if name.starts_with('-') {
+        return Err(format!("alias name must not start with '-': {name}"));
+    }
+    if name.contains('@') || name.contains(':') || name.contains(',') || name.contains(char::is_whitespace) {
+        return Err(format!(
+            "alias name '{name}' is not selectable: names must not contain '@', ':', ',', or whitespace (they would be treated as a literal ssh target)"
+        ));
+    }
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return Err(format!(
+            "alias name '{name}' is not selectable: it parses as an IP address and would be treated as a literal ssh target"
+        ));
+    }
+    if target.is_empty() || (!target.contains('@') && !target.contains(':') && target.parse::<std::net::IpAddr>().is_err() && !target.contains('.')) {
+        return Err(format!(
+            "ssh target '{target}' does not look like a valid ssh target (expected user@host, host, host:port or an IP)"
+        ));
+    }
     let mut entries = load_all()?;
     if entries.iter().any(|e| e.name == name) {
         return Err(format!(
@@ -208,7 +241,9 @@ pub fn expand_group(tag: &str) -> Result<Vec<(String, Option<String>, Option<Str
             (
                 e.target.clone(),
                 e.remote_bin.clone(),
-                e.password.clone().or_else(env_password),
+                // Environment wins over the stored credential (matches the
+                // env_password doc; see resolve()).
+                env_password().or(e.password.clone()),
             )
         })
         .collect())

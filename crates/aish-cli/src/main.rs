@@ -847,7 +847,21 @@ fn main() {
         // Authorization (RBAC): the installed policy's remote_access section
         // may restrict which operators may perform which actions.
         if let Some(key) = &operator_key {
-            let yaml = remote_access::installed_policy_yaml();
+            // A policy file that exists but cannot be read must fail closed
+            // (review fix): treat as auth failure, not as "no policy".
+            let yaml = match remote_access::installed_policy_yaml() {
+                Ok(yaml) => yaml,
+                Err(reason) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "auth_failed": true,
+                            "reason": reason,
+                        })
+                    );
+                    std::process::exit(4);
+                }
+            };
             if !remote_access::authorize_action(&yaml, action, key) {
                 println!(
                     "{}",
@@ -1135,7 +1149,9 @@ fn all_configured_targets() -> Result<Vec<(String, Option<String>, Option<String
             (
                 e.target,
                 e.remote_bin,
-                e.password.or_else(remote_hosts::env_password),
+                // Environment wins over the stored credential (matches the
+                // env_password doc; see remote_hosts::resolve()).
+                remote_hosts::env_password().or(e.password),
             )
         })
         .collect())
