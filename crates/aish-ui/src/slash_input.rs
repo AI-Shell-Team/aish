@@ -199,6 +199,15 @@ impl SlashInputSession {
             terminal.draw(|frame| self.render(frame, frame.area()))?;
 
             let event = event::read()?;
+            // A `Viewport::Fixed` is never auto-resized by ratatui, so a
+            // window change would leave the popup drawn at stale absolute
+            // rows. Rebuild it at the new geometry instead.
+            if matches!(event, Event::Resize(..)) {
+                let _ = terminal.clear();
+                drop(terminal);
+                terminal = open_inline_terminal(viewport_height)?;
+                continue;
+            }
             if let Some(result) = self.handle_event(event) {
                 break result;
             }
@@ -739,46 +748,48 @@ impl InlineTerminal {
     /// caller's next `read_line` redraws the prompt several rows below the
     /// original position and leaves blank lines above it.
     pub(crate) fn clear(&mut self) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        let end = self.start_row.saturating_add(self.height);
-        for y in self.start_row..end {
-            execute!(
-                stdout,
-                cursor::MoveTo(0, y),
-                terminal::Clear(terminal::ClearType::CurrentLine)
-            )?;
-        }
-        execute!(stdout, cursor::MoveTo(0, self.start_row))?;
-        stdout.flush()
+        clear_rows(self.start_row, self.height)
     }
 }
 
+/// Erase `height` screen rows starting at `start_row` and park the cursor on
+/// `start_row`.
+///
+/// Shared by [`InlineTerminal`] (open and close) and `PanelRuntime` so the
+/// popup and panel cleanup policies cannot drift apart. Best-effort: a write
+/// failure aborts the remaining rows, but the caller decides whether that is
+/// fatal (`PanelRuntime` ignores it and still returns its outcome).
+pub(crate) fn clear_rows(start_row: u16, height: u16) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    let end = start_row.saturating_add(height.max(1));
+    let result = (start_row..end).try_for_each(|y| {
+        execute!(
+            stdout,
+            cursor::MoveTo(0, y),
+            terminal::Clear(terminal::ClearType::CurrentLine)
+        )
+    });
+    // Park the cursor even when a row write failed: the caller's prompt is
+    // drawn next and must not land inside the erased region.
+    let park = execute!(stdout, cursor::MoveTo(0, start_row));
+    stdout.flush()?;
+    result.and(park)
+}
+
 pub(crate) fn open_inline_terminal(height: u16) -> io::Result<InlineTerminal> {
-    // Use Viewport::Fixed anchored at the current cursor row instead of
+    // Use Viewport::Fixed anchored near the cursor instead of
     // Viewport::Inline. Inline calls `append_lines(height-1)` which prints
     // `\n` bytes to reserve screen space; when the popup sits near the
     // bottom of the terminal those newlines scroll the screen and the
     // scroll is NOT undone by the popup's cleanup — leaving blank lines
     // above the prompt. Fixed needs no scroll reservation.
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
-    let rows = rows.max(1);
-    // Fall back to the top row when the terminal does not answer the DSR
-    // query (spawned PTYs, some multiplexers); drawing at row 0 is readable,
-    // whereas an unanchored popup would land wherever the cursor happened to
-    // be.
-    let start_row = crossterm::cursor::position()
-        .map(|(_, y)| y.min(rows - 1))
-        .unwrap_or(0);
-    let clamped_height = height.clamp(1, rows - start_row);
+    let (start_row, clamped_height) = popup_area(rows, height);
     // Clear the popup region so stale terminal content (previous command
     // output, scrollback) does not bleed through between popup rows. Fixed
     // only redraws its own cells — without this, old text shows through in
     // gaps (e.g. short command descriptions leaving trailing chars).
-    execute!(
-        io::stdout(),
-        cursor::MoveTo(0, start_row),
-        terminal::Clear(terminal::ClearType::FromCursorDown)
-    )?;
+    clear_rows(start_row, clamped_height)?;
     let area = ratatui::layout::Rect::new(0, start_row, cols, clamped_height);
     let terminal = Terminal::with_options(
         CrosstermBackend::new(io::stdout()),
@@ -791,6 +802,66 @@ pub(crate) fn open_inline_terminal(height: u16) -> io::Result<InlineTerminal> {
         start_row,
         height: clamped_height,
     })
+}
+
+/// Resolve the popup rectangle as `(start_row, height)`.
+///
+/// * The popup is lifted off the cursor row when the remaining rows below it
+///   cannot hold the full height — mirroring how `Viewport::Inline` used to
+///   subtract the missing lines. Clamping the height instead would collapse
+///   the command list to one row whenever the prompt sits near the bottom of
+///   the screen, which is exactly when the popup is opened (rustyline emits a
+///   newline on `Cmd::Interrupt`, pushing the prompt down).
+/// * A failed cursor query (spawned PTYs, non-answering multiplexers) docks
+///   the popup at the bottom rows rather than anchoring at row 0, so the
+///   caller's pre-clear does not wipe the whole screen.
+pub(crate) fn popup_area(rows: u16, height: u16) -> (u16, u16) {
+    let rows = rows.max(1);
+    let height = height.clamp(1, rows);
+    let cursor_row = crossterm::cursor::position()
+        .map(|(_, y)| y.min(rows - 1))
+        .unwrap_or_else(|_| rows - height);
+    let start_row = cursor_row.min(rows - height);
+    (start_row, height)
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::popup_area;
+
+    /// A popup on the last screen row must be lifted so its full height is
+    /// visible, not squeezed to a single row.
+    #[test]
+    fn popup_is_lifted_when_there_is_no_room_below() {
+        let (start_row, height) = popup_area(24, 10);
+        assert_eq!(height, 10);
+        assert!(start_row + height <= 24, "popup must fit on screen");
+    }
+
+    /// A popup whose height exceeds the terminal is clamped to the screen.
+    #[test]
+    fn popup_height_is_clamped_to_terminal() {
+        let (start_row, height) = popup_area(10, 40);
+        assert_eq!(height, 10);
+        assert_eq!(start_row, 0);
+    }
+
+    /// A degenerate zero-row terminal must not panic or produce row 0 with
+    /// zero height.
+    #[test]
+    fn zero_height_terminal_still_yields_one_row() {
+        let (start_row, height) = popup_area(0, 8);
+        assert_eq!(height, 1);
+        assert_eq!(start_row, 0);
+    }
+
+    /// A height-1 popup never starts past the last usable row.
+    #[test]
+    fn single_row_popup_stays_on_screen() {
+        let (start_row, height) = popup_area(24, 1);
+        assert_eq!(height, 1);
+        assert!(start_row < 24);
+    }
 }
 
 pub(crate) fn longest_common_prefix(names: &[&str]) -> String {

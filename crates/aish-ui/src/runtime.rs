@@ -57,35 +57,24 @@ impl PanelRuntime {
         C: PanelComponent,
     {
         let (cols, rows) = terminal::size()?;
-        let height = component.desired_height(cols, rows).clamp(1, rows.max(1));
+        let height = component.desired_height(cols, rows);
         let _guard = TerminalGuard::enter()?;
-        // Use `Viewport::Fixed` anchored near the cursor instead of
-        // `Viewport::Inline`. Inline calls `append_lines(height-1)` which
-        // prints `\n` bytes to reserve screen space; when the panel sits near
-        // the bottom of the terminal those newlines scroll the screen, and
-        // the cleanup on exit cannot undo the scroll — leaving blank lines.
-        // Fixed needs no scroll reservation.
+        // Use `Viewport::Fixed` instead of `Viewport::Inline`. Inline calls
+        // `append_lines(height-1)` which prints `\n` bytes to reserve screen
+        // space; when the panel sits near the bottom of the terminal those
+        // newlines scroll the screen, and the cleanup on exit cannot undo the
+        // scroll — leaving blank lines. Fixed needs no scroll reservation.
         //
-        // Anchor at the cursor row when the remaining rows below can hold the
-        // panel; otherwise lift it so the full height fits. A tall panel
-        // (e.g. /setting) must not be squeezed into the few rows that happen
-        // to sit under a prompt near the bottom of the screen.
-        let rows = rows.max(1);
-        let height = height.min(rows);
-        let cursor_row = crossterm::cursor::position()
-            .map(|(_, y)| y.min(rows - 1))
-            .unwrap_or_else(|_| rows.saturating_sub(height));
-        let start_row = cursor_row.min(rows - height);
-        let clamped_height = height;
+        // Shared with the slash/@ popups so the anchor and erase policies
+        // cannot drift apart: the popup is lifted (not shrunk) when the rows
+        // below the cursor cannot hold it, and a failed cursor query docks it
+        // at the bottom rows instead of anchoring at row 0.
+        let (mut start_row, mut clamped_height) = crate::slash_input::popup_area(rows, height);
         // Wipe stale terminal content in the panel region before the first
         // draw: a Fixed viewport only repaints its own cells, so any
         // previously printed command output would otherwise show through the
         // gaps between panel rows.
-        execute!(
-            io::stdout(),
-            crossterm::cursor::MoveTo(0, start_row),
-            terminal::Clear(terminal::ClearType::FromCursorDown)
-        )?;
+        let _ = crate::slash_input::clear_rows(start_row, clamped_height);
         let area = Rect::new(0, start_row, cols, clamped_height);
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::with_options(
@@ -113,6 +102,27 @@ impl PanelRuntime {
                 }
                 None => event::read()?,
             };
+            // A `Viewport::Fixed` is never auto-resized by ratatui, so a
+            // window change would leave the panel drawn at stale absolute
+            // rows (and the exit cleanup erasing rows that no longer exist).
+            // Rebuild it at the new geometry.
+            if matches!(event, event::Event::Resize(..)) {
+                let _ = crate::slash_input::clear_rows(start_row, clamped_height);
+                drop(terminal);
+                let (c, r) = terminal::size()?;
+                let h = component.desired_height(c, r);
+                let (row, height) = crate::slash_input::popup_area(r, h);
+                let _ = crate::slash_input::clear_rows(row, height);
+                start_row = row;
+                clamped_height = height;
+                terminal = Terminal::with_options(
+                    CrosstermBackend::new(io::stdout()),
+                    TerminalOptions {
+                        viewport: Viewport::Fixed(Rect::new(0, row, c, height)),
+                    },
+                )?;
+                continue;
+            }
             match component.handle_event(event) {
                 PanelEvent::Continue => continue,
                 PanelEvent::Submit(value) => break PanelOutcome::Submitted(value),
@@ -124,20 +134,10 @@ impl PanelRuntime {
         // row. `Terminal::clear()` cannot be used here: on ratatui-core 0.1.2
         // it snapshots the cursor by DSR and restores it to wherever the last
         // draw left it (the bottom of the panel), which pushes the next
-        // prompt several rows down and leaves blank lines above it.
-        {
-            let mut stdout = io::stdout();
-            let end = start_row.saturating_add(clamped_height);
-            for y in start_row..end {
-                execute!(
-                    stdout,
-                    crossterm::cursor::MoveTo(0, y),
-                    terminal::Clear(terminal::ClearType::CurrentLine)
-                )?;
-            }
-            execute!(stdout, crossterm::cursor::MoveTo(0, start_row))?;
-            stdout.flush()?;
-        }
+        // prompt several rows down and leaves blank lines above it. The
+        // cleanup is best-effort so a failed write never discards an outcome
+        // the component already submitted.
+        let _ = crate::slash_input::clear_rows(start_row, clamped_height);
         Ok(outcome)
     }
 }
