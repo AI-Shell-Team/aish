@@ -9397,18 +9397,18 @@ impl AishShell {
         // (model, base, key) that should be on disk. Swap it in for the
         // write, keeping the live values aside for the restore below.
         let live_values = if self.session_model_override {
-            let baseline = self.session_override_baseline.take();
-            if let Some((model, base, key)) = &baseline {
-                Some((
-                    std::mem::replace(&mut self.config.model, model.clone()),
-                    std::mem::replace(&mut self.config.api_base, base.clone()),
-                    std::mem::replace(&mut self.config.api_key, key.clone()),
-                ))
-            } else {
+            match &self.session_override_baseline {
+                Some(baseline) => Some((
+                    std::mem::replace(&mut self.config.model, baseline.0.clone()),
+                    std::mem::replace(&mut self.config.api_base, baseline.1.clone()),
+                    std::mem::replace(&mut self.config.api_key, baseline.2.clone()),
+                )),
                 // Inconsistent state (override without a baseline): stop
                 // treating the values as temporary rather than guessing.
-                self.session_model_override = false;
-                None
+                None => {
+                    self.session_model_override = false;
+                    None
+                }
             }
         } else {
             None
@@ -9427,8 +9427,10 @@ impl AishShell {
             );
         }
         // Put the override back in memory (still live until exit or an
-        // explicit default-saving switch) and stash the baseline for the
-        // next persist.
+        // explicit default-saving switch). The stored baseline is NOT
+        // consumed: it must survive every persist, or the *second*
+        // unrelated save would find no baseline and write the temporary
+        // values as defaults.
         if let Some((model, base, key)) = live_values {
             self.config.model = model;
             self.config.api_base = base;
@@ -9516,7 +9518,11 @@ impl AishShell {
         // one dead endpoint cannot hide behind another working one. Progress
         // is echoed on one in-place line: the panel opens on an inline
         // viewport, so anything printed here stays in the scrollback above it.
-        let mut fetched: Vec<(String, String)> = Vec::new();
+        // Each fetched model carries the account that returned it: two
+        // accounts sharing a base URL can list different model sets, and a
+        // model returned only by the second account must not be attributed
+        // to the first.
+        let mut fetched: Vec<(String, String, String)> = Vec::new();
         let mut fetch_errors: Vec<(String, String)> = Vec::new();
         let total = endpoints.len();
         for (idx, e) in endpoints.iter().enumerate() {
@@ -9534,7 +9540,7 @@ impl AishShell {
             match fetch_models_from_api(&e.base, &e.key, 4) {
                 Ok(models) => {
                     for m in models {
-                        fetched.push((m, e.base.clone()));
+                        fetched.push((m, e.base.clone(), e.name.clone()));
                     }
                 }
                 Err(reason) => fetch_errors.push((e.base.clone(), reason)),
@@ -9581,14 +9587,8 @@ impl AishShell {
                     }
                 }
             }
-            for (m, b) in &fetched {
-                let acct = self
-                    .endpoints_snapshot()
-                    .into_iter()
-                    .find(|e| &e.base == b)
-                    .map(|e| e.name)
-                    .unwrap_or_else(|| PRIMARY_ACCOUNT_NAME.to_string());
-                let val = picker_value(m, b, &acct);
+            for (m, b, acct) in &fetched {
+                let val = picker_value(m, b, acct);
                 if seen.insert(val.clone()) {
                     items.push(
                         SearchSelectItem::new(val, m.clone())
@@ -9600,9 +9600,13 @@ impl AishShell {
             // Also surface each account's configured model, in case its endpoint
             // didn't respond to the /models fetch — the user explicitly set it,
             // so it must always be reachable in the list. Marked "unverified"
-            // when this round's fetch could not confirm it.
-            let verified: std::collections::HashSet<&str> =
-                fetched.iter().map(|(m, _)| m.as_str()).collect();
+            // when this round's fetch could not confirm it. Verification is
+            // per (model, account, base): a model confirmed by one account
+            // must not badge another account's entry sharing the same name.
+            let verified: std::collections::HashSet<(&str, &str, &str)> = fetched
+                .iter()
+                .map(|(m, b, acct)| (m.as_str(), acct.as_str(), b.as_str()))
+                .collect();
             for a in &self.config.api_accounts {
                 if a.disabled {
                     continue;
@@ -9614,7 +9618,8 @@ impl AishShell {
                         .unwrap_or_else(|| self.config.api_base.clone());
                     let val = picker_value(m, &base, &a.name);
                     if seen.insert(val.clone()) {
-                        let unverified = !verified.contains(m.as_str());
+                        let unverified =
+                            !verified.contains(&(m.as_str(), a.name.as_str(), base.as_str()));
                         let mut item = SearchSelectItem::new(val, m.clone())
                             .with_detail(format!("{} · {}", a.name, base))
                             .with_search_text(format!("{} {} {}", m, a.name, base));
@@ -9673,7 +9678,7 @@ impl AishShell {
                             let key = endpoint
                                 .map(|e| e.key)
                                 .unwrap_or_else(|| self.config.api_key.clone());
-                            self.switch_endpoint_model(base, &key, model);
+                            self.switch_endpoint_model(base, &key, model, account);
                         }
                     }
                     // Enter finishes the picker and hands the keyboard back to
@@ -9738,7 +9743,7 @@ impl AishShell {
                         match fetch_models_from_api(&e.base, &e.key, 4) {
                             Ok(models) => {
                                 for m in models {
-                                    fetched.push((m, e.base.clone()));
+                                    fetched.push((m, e.base.clone(), e.name.clone()));
                                 }
                             }
                             Err(reason) => fetch_errors.push((e.base.clone(), reason)),
@@ -9762,7 +9767,7 @@ impl AishShell {
     /// choice is recorded in recent history. The result message states the
     /// model, the account in use and whether the default was saved; a failed
     /// config write keeps the session running and says so (issue #592).
-    fn switch_endpoint_model(&mut self, base: &str, key: &str, model: &str) {
+    fn switch_endpoint_model(&mut self, base: &str, key: &str, model: &str, account: &str) {
         let prev_base = self.config.api_base.clone();
         let prev_key = self.config.api_key.clone();
         let prev_model = self.config.model.clone();
@@ -9807,14 +9812,16 @@ impl AishShell {
         self.session_override_baseline = None;
         self.ai_handler.update_model(model, Some(base), Some(key));
         if let Some(ai) = &self.inline_ai {
-            ai.update_model(model);
+            ai.update_endpoint(model, base, key);
         }
         self.refresh_config_dependent_tools();
         let rec = format!("{}\u{0}{}", model, base);
         self.config.recent_models.retain(|r| r != &rec);
         self.config.recent_models.insert(0, rec);
         self.config.recent_models.truncate(20);
-        let account = self.primary_display_name();
+        // Report the account the picker selected, not a post-promotion
+        // lookup: the promote step above may have removed the named entry
+        // this result message should still refer to.
         let save_result = self.persist_config_and_rebuild_rotation();
         match save_result {
             Ok(()) => println!(
@@ -9822,7 +9829,7 @@ impl AishShell {
                 theme::success(&t_with_args("shell.model.switch_saved", &{
                     let mut args = std::collections::HashMap::new();
                     args.insert("model".to_string(), model.to_string());
-                    args.insert("account".to_string(), account);
+                    args.insert("account".to_string(), account.to_string());
                     args
                 },)),
             ),
@@ -9831,7 +9838,7 @@ impl AishShell {
                 theme::warning(&t_with_args("shell.model.switch_session_only", &{
                     let mut args = std::collections::HashMap::new();
                     args.insert("model".to_string(), model.to_string());
-                    args.insert("account".to_string(), account);
+                    args.insert("account".to_string(), account.to_string());
                     args
                 },)),
             ),
@@ -9860,7 +9867,7 @@ impl AishShell {
         self.session_model_override = true;
         self.ai_handler.update_model(model, Some(base), Some(key));
         if let Some(ai) = &self.inline_ai {
-            ai.update_model(model);
+            ai.update_endpoint(model, base, key);
         }
         self.refresh_config_dependent_tools();
         let rec = format!("{}\u{0}{}", model, base);
@@ -9874,7 +9881,7 @@ impl AishShell {
             theme::accent(&t_with_args("shell.model.switch_session_ok", &{
                 let mut args = std::collections::HashMap::new();
                 args.insert("model".to_string(), model.to_string());
-                args.insert("account".to_string(), account);
+                args.insert("account".to_string(), account.to_string());
                 args
             },)),
         );
@@ -10020,9 +10027,10 @@ impl AishShell {
             Some(&self.config.api_base),
             Some(&self.config.api_key),
         );
-        // Update inline completion model so it follows `/model` switches
+        // Update inline completion so it follows `/model` switches: the
+        // endpoint + credential must follow too, not just the model name.
         if let Some(ai) = &self.inline_ai {
-            ai.update_model(&new_model);
+            ai.update_endpoint(&new_model, &self.config.api_base, &self.config.api_key);
         }
         // Update config. A direct `/model <name>` asks for a new default, so
         // any pending session-only override ends here (issue #592).
@@ -10042,7 +10050,7 @@ impl AishShell {
                 theme::success(&t_with_args("shell.model.switch_saved", &{
                     let mut args = std::collections::HashMap::new();
                     args.insert("model".to_string(), new_model);
-                    args.insert("account".to_string(), account);
+                    args.insert("account".to_string(), account.to_string());
                     args
                 },)),
             ),
@@ -10060,7 +10068,7 @@ impl AishShell {
                     theme::warning(&t_with_args("shell.model.switch_session_only", &{
                         let mut args = std::collections::HashMap::new();
                         args.insert("model".to_string(), new_model);
-                        args.insert("account".to_string(), account);
+                        args.insert("account".to_string(), account.to_string());
                         args
                     },)),
                 );
@@ -10729,7 +10737,11 @@ impl AishShell {
                         Some(&self.config.api_key),
                     );
                     if let Some(ai) = &self.inline_ai {
-                        ai.update_model(&self.config.model);
+                        ai.update_endpoint(
+                            &self.config.model,
+                            &self.config.api_base,
+                            &self.config.api_key,
+                        );
                     }
                     self.refresh_config_dependent_tools();
                 }
@@ -11223,6 +11235,15 @@ impl AishShell {
                     Some(&self.config.api_base),
                     Some(&self.config.api_key),
                 );
+                // The wizard may have changed the endpoint or credential too;
+                // keep inline completion on the same host + key.
+                if let Some(ai) = &self.inline_ai {
+                    ai.update_endpoint(
+                        &self.config.model,
+                        &self.config.api_base,
+                        &self.config.api_key,
+                    );
+                }
                 self.refresh_config_dependent_tools();
                 let mut args = std::collections::HashMap::new();
                 args.insert("model".to_string(), self.config.model.clone());
@@ -16541,6 +16562,28 @@ mod model_switch_tests {
         );
         assert!(!on_disk.contains("model: model-b"));
         // The override stays live in memory.
+        assert_eq!(shell.config.model, "model-b");
+        assert!(shell.session_model_override);
+
+        // A second unrelated persist must still write the baseline: the
+        // stored baseline survives every persist, or this save would write
+        // the temporary values as defaults (regression guard).
+        shell.config.fallback_models.push("fallback-y".to_string());
+        let saved = shell.persist_config_and_rebuild_rotation();
+        assert!(saved.is_ok(), "second save should succeed too");
+        let on_disk = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(
+            on_disk.contains("model: test-model"),
+            "baseline must still be on disk after the second save, got: {}",
+            on_disk
+                .lines()
+                .find(|l| l.starts_with("model:"))
+                .unwrap_or("")
+        );
+        assert!(
+            !on_disk.contains("model: model-b"),
+            "the second save leaked the session-only model into the file"
+        );
         assert_eq!(shell.config.model, "model-b");
         assert!(shell.session_model_override);
     }

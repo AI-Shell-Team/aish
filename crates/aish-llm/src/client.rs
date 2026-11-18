@@ -11,9 +11,11 @@ use crate::types::{ChatMessage, ToolSpec};
 /// HTTP client for OpenAI-compatible chat completion APIs.
 pub struct LlmClient {
     http: Client,
-    api_base: String,
-    api_key: String,
-    model: std::sync::Mutex<String>,
+    /// Mutex-wrapped so a runtime `/model` switch can rebind the endpoint +
+    /// credential on a client shared through an `Arc` (inline completion).
+    api_base: parking_lot::Mutex<String>,
+    api_key: parking_lot::Mutex<String>,
+    model: parking_lot::Mutex<String>,
     /// When true, send `Connection: close` so the server terminates the HTTP
     /// stream and closes first. One-shot probes use this to avoid leaving the
     /// upstream with a client-abort signature after the last SSE byte.
@@ -25,9 +27,9 @@ impl LlmClient {
         let model = resolve_model_for_api(model, api_base);
         Self {
             http: Client::new(),
-            api_base: api_base.trim_end_matches('/').into(),
-            api_key: api_key.into(),
-            model: std::sync::Mutex::new(model),
+            api_base: parking_lot::Mutex::new(api_base.trim_end_matches('/').into()),
+            api_key: parking_lot::Mutex::new(api_key.into()),
+            model: parking_lot::Mutex::new(model),
             close_connection: false,
         }
     }
@@ -40,42 +42,42 @@ impl LlmClient {
     }
 
     /// Return the API base URL.
-    pub fn api_base(&self) -> &str {
-        &self.api_base
+    pub fn api_base(&self) -> String {
+        self.api_base.lock().clone()
     }
 
     /// Return the API key.
-    pub fn api_key(&self) -> &str {
-        &self.api_key
+    pub fn api_key(&self) -> String {
+        self.api_key.lock().clone()
     }
 
     /// Return the model name used for this client.
     pub fn model_name(&self) -> String {
-        self.model.lock().unwrap().clone()
+        self.model.lock().clone()
     }
 
     /// Update the model name (used for runtime model switching).
     pub fn update_model(&self, model: &str) {
-        *self.model.lock().unwrap() = resolve_model_for_api(model, &self.api_base);
+        *self.model.lock() = resolve_model_for_api(model, &self.api_base());
     }
 
-    /// Update the API key.
-    pub fn update_api_key(&mut self, api_key: &str) {
-        self.api_key = api_key.to_string();
+    /// Update the API key (used for runtime endpoint switching).
+    pub fn update_api_key(&self, api_key: &str) {
+        *self.api_key.lock() = api_key.to_string();
     }
 
-    /// Update the API base URL.
-    pub fn update_api_base(&mut self, api_base: &str) {
-        self.api_base = api_base.trim_end_matches('/').to_string();
+    /// Update the API base URL (used for runtime endpoint switching).
+    pub fn update_api_base(&self, api_base: &str) {
+        *self.api_base.lock() = api_base.trim_end_matches('/').to_string();
     }
 
     /// Test connectivity by sending a lightweight request to the API.
     pub async fn test_connection(&self) -> Result<(), String> {
-        let url = format!("{}/models", self.api_base);
+        let url = format!("{}/models", self.api_base());
         let resp = self
             .http
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", format!("Bearer {}", self.api_key()))
             .timeout(std::time::Duration::from_secs(5))
             .send()
             .await
@@ -174,7 +176,7 @@ impl LlmClient {
         extras: serde_json::Map<String, serde_json::Value>,
     ) -> Result<LlmResponse, AishError> {
         let mut body = serde_json::json!({
-            "model": self.model.lock().unwrap().clone(),
+            "model": self.model.lock().clone(),
             "messages": messages,
             "stream": stream,
         });
@@ -198,7 +200,7 @@ impl LlmClient {
             }
         }
 
-        let url = format!("{}/chat/completions", self.api_base);
+        let url = format!("{}/chat/completions", self.api_base());
 
         // Retry transient failures (5xx, 429, connect/timeout errors) with
         // exponential backoff. Errors that signal a bug or auth issue are
@@ -219,7 +221,7 @@ impl LlmClient {
             let mut req = self
                 .http
                 .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Authorization", format!("Bearer {}", self.api_key()))
                 .header("Content-Type", "application/json")
                 .timeout(std::time::Duration::from_secs(120));
             if self.close_connection {

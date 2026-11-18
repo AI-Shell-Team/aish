@@ -497,7 +497,7 @@ shell:
     switch_same: "モデルは変更されていません: {model}"
     switch_saved: "{model} に切り替えました · {account} · デフォルトに保存"
     switch_session_ok: "このセッションのみ {model} に切り替えました · {account}（デフォルトは変更なし）"
-    switch_session_only: "このセッションでは {model} に切り替えました；デフォルトモデルは未保存"
+    switch_session_only: "このセッションでは {model} · {account} に切り替えました；デフォルトモデルは未保存"
     verify_failed: "モデル検証に失敗しました: {reason}"
     picker_title: "モデル / アカウント切替"
     picker_subtitle: "↑↓ 選択、Enter で切替"

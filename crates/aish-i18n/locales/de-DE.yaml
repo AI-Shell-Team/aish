@@ -497,7 +497,7 @@ shell:
     switch_same: "Modell unverändert: {model}"
     switch_saved: "Zu {model} gewechselt · {account} · als Standard gespeichert"
     switch_session_ok: "Zu {model} gewechselt · {account} · nur diese Sitzung (Standard unveraendert)"
-    switch_session_only: "Fuer diese Sitzung zu {model} gewechselt; Standardmodell NICHT gespeichert"
+    switch_session_only: "Fuer diese Sitzung zu {model} · {account} gewechselt; Standardmodell NICHT gespeichert"
     verify_failed: "Modellvalidierung fehlgeschlagen: {reason}"
     picker_title: "Modell / Konto wechseln"
     picker_subtitle: "↑↓ Auswaehlen, Enter wechseln"

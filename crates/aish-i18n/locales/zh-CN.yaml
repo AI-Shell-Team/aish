@@ -1036,7 +1036,7 @@ shell:
     switch_same: "模型未变更，仍为: {model}"
     switch_saved: "已切换到 {model} · {account} · 已设为默认"
     switch_session_ok: "本会话已切换到 {model} · {account}（默认配置不变）"
-    switch_session_only: "本会话已切换到 {model}；默认模型未保存"
+    switch_session_only: "本会话已切换到 {model} · {account}；默认模型未保存"
     verify_failed: "模型验证失败: {reason}"
     picker_title: "切换模型 / 账户"
     picker_subtitle: "↑↓ 选择，Enter 切换到该模型/账户"

@@ -497,7 +497,7 @@ shell:
     switch_same: "Modele inchange : {model}"
     switch_saved: "Passe a {model} · {account} · enregistre par defaut"
     switch_session_ok: "Passe a {model} · {account} · cette session seulement (defaut inchange)"
-    switch_session_only: "Passe a {model} pour cette session ; modele par defaut NON enregistre"
+    switch_session_only: "Passe a {model} · {account} pour cette session ; modele par defaut NON enregistre"
     verify_failed: "La validation du modele a echoue : {reason}"
     picker_title: "Changer modele / compte"
     picker_subtitle: "↑↓ selectionner, Enter basculer"

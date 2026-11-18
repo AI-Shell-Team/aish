@@ -1036,7 +1036,7 @@ shell:
     switch_same: "Model unchanged: {model}"
     switch_saved: "Switched to {model} · {account} · saved as default"
     switch_session_ok: "Switched to {model} · {account} · this session only (default unchanged)"
-    switch_session_only: "Switched to {model} for this session; default model NOT saved"
+    switch_session_only: "Switched to {model} · {account} for this session; default model NOT saved"
     verify_failed: "Model validation failed: {reason}"
     picker_title: "Switch model / account"
     picker_subtitle: "Up/Dn to select, Enter to switch"

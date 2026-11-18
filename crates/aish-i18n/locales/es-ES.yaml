@@ -497,7 +497,7 @@ shell:
     switch_same: "El modelo no ha cambiado: {model}"
     switch_saved: "Cambiado a {model} · {account} · guardado como predeterminado"
     switch_session_ok: "Cambiado a {model} · {account} · solo esta sesion (predeterminado sin cambios)"
-    switch_session_only: "Cambiado a {model} para esta sesion; modelo predeterminado NO guardado"
+    switch_session_only: "Cambiado a {model} · {account} para esta sesion; modelo predeterminado NO guardado"
     verify_failed: "Falló la validación del modelo: {reason}"
     picker_title: "Cambiar modelo / cuenta"
     picker_subtitle: "↑↓ seleccionar, Enter cambiar"
