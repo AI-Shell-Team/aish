@@ -207,7 +207,6 @@ impl SlashInputSession {
         // All terminal cleanup MUST happen while still in raw mode.
         // If terminal is dropped after termios restore, its Drop impl may
         // write escape sequences in cooked mode, corrupting the terminal
-        // and causing the next SlashInputSession invocation to hang.
         let _ = terminal.clear();
         drop(terminal);
         drop(_guard);
@@ -700,15 +699,98 @@ pub(crate) fn drain_pending_events() -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn open_inline_terminal(
+/// Inline popup terminal docked at an absolute terminal row.
+///
+/// Wraps the ratatui terminal together with the row it starts on so the
+/// popup can erase exactly its own rows and park the cursor back on
+/// `start_row` when it closes.
+pub(crate) struct InlineTerminal {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    /// Absolute terminal row of the popup's first line.
+    start_row: u16,
+    /// Number of rows the popup occupies.
     height: u16,
-) -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    Terminal::with_options(
+}
+
+impl InlineTerminal {
+    /// Redraw the popup contents.
+    pub(crate) fn draw<F>(&mut self, render: F) -> io::Result<()>
+    where
+        F: FnOnce(&mut ratatui::Frame<'_>),
+    {
+        self.terminal.draw(render)?;
+        Ok(())
+    }
+
+    /// Resize the viewport to match the terminal after a window change.
+    ///
+    /// A `Viewport::Fixed` is never auto-resized by ratatui, so this is a
+    /// no-op today; the call is kept so callers read the same as before.
+    pub(crate) fn autoresize(&mut self) -> io::Result<()> {
+        self.terminal.autoresize()?;
+        Ok(())
+    }
+
+    /// Erase every popup row and move the cursor back to `start_row`.
+    ///
+    /// `Terminal::clear()` is deliberately NOT used here: on ratatui-core
+    /// 0.1.2 it snapshots the cursor via DSR and restores it afterwards to
+    /// wherever the last `draw` left it (the bottom of the popup), so the
+    /// caller's next `read_line` redraws the prompt several rows below the
+    /// original position and leaves blank lines above it.
+    pub(crate) fn clear(&mut self) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        let end = self.start_row.saturating_add(self.height);
+        for y in self.start_row..end {
+            execute!(
+                stdout,
+                cursor::MoveTo(0, y),
+                terminal::Clear(terminal::ClearType::CurrentLine)
+            )?;
+        }
+        execute!(stdout, cursor::MoveTo(0, self.start_row))?;
+        stdout.flush()
+    }
+}
+
+pub(crate) fn open_inline_terminal(height: u16) -> io::Result<InlineTerminal> {
+    // Use Viewport::Fixed anchored at the current cursor row instead of
+    // Viewport::Inline. Inline calls `append_lines(height-1)` which prints
+    // `\n` bytes to reserve screen space; when the popup sits near the
+    // bottom of the terminal those newlines scroll the screen and the
+    // scroll is NOT undone by the popup's cleanup — leaving blank lines
+    // above the prompt. Fixed needs no scroll reservation.
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let rows = rows.max(1);
+    // Fall back to the top row when the terminal does not answer the DSR
+    // query (spawned PTYs, some multiplexers); drawing at row 0 is readable,
+    // whereas an unanchored popup would land wherever the cursor happened to
+    // be.
+    let start_row = crossterm::cursor::position()
+        .map(|(_, y)| y.min(rows - 1))
+        .unwrap_or(0);
+    let clamped_height = height.clamp(1, rows - start_row);
+    // Clear the popup region so stale terminal content (previous command
+    // output, scrollback) does not bleed through between popup rows. Fixed
+    // only redraws its own cells — without this, old text shows through in
+    // gaps (e.g. short command descriptions leaving trailing chars).
+    execute!(
+        io::stdout(),
+        cursor::MoveTo(0, start_row),
+        terminal::Clear(terminal::ClearType::FromCursorDown)
+    )?;
+    let area = ratatui::layout::Rect::new(0, start_row, cols, clamped_height);
+    let terminal = Terminal::with_options(
         CrosstermBackend::new(io::stdout()),
         TerminalOptions {
-            viewport: Viewport::Inline(height),
+            viewport: Viewport::Fixed(area),
         },
-    )
+    )?;
+    Ok(InlineTerminal {
+        terminal,
+        start_row,
+        height: clamped_height,
+    })
 }
 
 pub(crate) fn longest_common_prefix(names: &[&str]) -> String {
