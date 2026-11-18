@@ -236,14 +236,9 @@ impl SlashInputSession {
         if self.filtered.is_empty() {
             return 1;
         }
-        // Match the viewport to the rows actually rendered (commands plus one
-        // header per present group, capped at MAX_VISIBLE_COMMANDS). A fixed
-        // 9-row reserve made the popup open with 8 blank lines whenever the
-        // query matched only one command — ratatui's inline viewport
-        // appends height-1 real newlines, and the closing clear only erases
-        // from the viewport origin down, so the blanks stayed in scrollback.
-        let visible = self.display_rows().len().min(MAX_VISIBLE_COMMANDS) as u16;
-        (1 + visible).min(MAX_PANEL_HEIGHT)
+        // Keep a stable height while the list is visible so typing does not resize
+        // the inline viewport on every filter change (which causes flicker).
+        (1 + MAX_VISIBLE_COMMANDS as u16).min(MAX_PANEL_HEIGHT)
     }
 
     /// Slash command token before the first space (e.g. `/help` from `/help foo`).
