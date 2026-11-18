@@ -120,6 +120,11 @@ pub trait CompletionProvider: Send + Sync {
     /// Update the underlying model (for runtime `/model` switching).
     /// Default no-op; only `LlmCompletionProvider` implements it.
     fn update_model(&self, _model: &str) {}
+
+    /// Update the underlying endpoint + credential so a `/model` switch to a
+    /// different account sends completions to the right host with the right
+    /// key. Default no-op; only `LlmCompletionProvider` implements it.
+    fn update_endpoint(&self, _model: &str, _api_base: &str, _api_key: &str) {}
 }
 
 /// Fake provider for tests and for the `AISH_INLINE_COMPLETION_FAUX` runtime hook.
@@ -281,6 +286,12 @@ impl CompletionProvider for LlmCompletionProvider {
     }
 
     fn update_model(&self, model: &str) {
+        self.client.update_model(model);
+    }
+
+    fn update_endpoint(&self, model: &str, api_base: &str, api_key: &str) {
+        self.client.update_api_base(api_base);
+        self.client.update_api_key(api_key);
         self.client.update_model(model);
     }
 }
@@ -801,6 +812,13 @@ impl InlineCompleter {
     /// Update the model used for inline completion (called on `/model` switch).
     pub fn update_model(&self, model: &str) {
         self.provider.update_model(model);
+    }
+
+    /// Rebind the model + endpoint + credential used for inline completion
+    /// (called on `/model` switches that may move to another account), so
+    /// completions always go to the active session's host with its key.
+    pub fn update_endpoint(&self, model: &str, api_base: &str, api_key: &str) {
+        self.provider.update_endpoint(model, api_base, api_key);
     }
 
     /// Cancel any in-flight prefetch, clear the hint slot, and stop the
