@@ -1556,6 +1556,24 @@ tools:
     execute_failed: "执行失败: {error}"
     output_truncated: "[...截断了 {bytes} 字节...]\n{tail}"
     truncated_notice: "[...截断了 {bytes} 字节...]"
+    background_started: "已启动后台任务 {task_id}。输出文件: {output_path}\n用 task_output 读取输出，task_list 查看任务，task_stop 停止任务。"
+    read_only:
+      blocked: "已拦截：命令不是只读操作（{reason}）"
+
+  task_output:
+    description: "读取 run_in_background 启动的后台任务的新输出。每次调用只返回自上次读取以来的新输出（增量游标）。任务运行期间可反复轮询跟踪进度。"
+    missing_task_id: "缺少 'task_id' 参数"
+    running: "运行中；已读到游标 {cursor}。再次调用获取更多输出。"
+    finished: "{status}；已读到游标 {cursor}。"
+    no_new_output: "（暂无新输出）"
+
+  task_list:
+    description: "列出所有后台任务及其状态（running/completed/failed/stopped）和退出码。用于检查 run_in_background 启动的任务。"
+
+  task_stop:
+    description: "停止运行中的后台任务：先向其进程组发送 SIGTERM，3 秒宽限期后 SIGKILL。"
+    missing_task_id: "缺少 'task_id' 参数"
+    stopped: "任务 {task_id} 已停止（退出码 {exit_code}）。"
     read_only:
       blocked: "已拦截：命令不是只读操作（{reason}）"
       unparseable: "已拦截：无法将该命令判定为只读"

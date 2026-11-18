@@ -16,6 +16,8 @@
 
 pub mod registry;
 
+pub mod task;
+
 pub mod agent_tool {
     mod agent_tool;
     mod prompt;
@@ -195,6 +197,7 @@ pub use memory_tool::{MemorySearchResult, MemoryTool};
 pub use plan_tool::{EnterPlanModeTool, ExitPlanModeTool, ListTemplatesTool};
 pub use python::PythonTool;
 pub use registry::ToolRegistry;
+pub use task::tools::{TaskListTool, TaskOutputTool, TaskStopTool};
 pub use secure_bash::SecureBashTool;
 pub use skill_registry::{SkillInstallTool, SkillSearchTool, SkillTrustTool};
 pub use skill_tool::{SkillInfo, SkillSpawnFn, SkillSpawnRequest, SkillTool};

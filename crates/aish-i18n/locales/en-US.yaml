@@ -1557,6 +1557,25 @@ tools:
     execute_failed: "Failed to execute: {error}"
     output_truncated: "[...{bytes} bytes truncated...]\n{tail}"
     truncated_notice: "[...{bytes} bytes truncated...]"
+    background_started: "Started background task {task_id}. Output file: {output_path}\nRead output with task_output, list tasks with task_list, stop with task_stop."
+    read_only:
+      blocked: "Blocked: command is not read-only ({reason})"
+      unparseable: "Blocked: command could not be analyzed as read-only"
+
+  task_output:
+    description: "Read new output from a background task started with run_in_background. Each call returns only new output since the last read (incremental cursor). Poll while the task is running to follow progress."
+    missing_task_id: "Missing 'task_id' parameter"
+    running: "running; read up to cursor {cursor}. Poll again for more output."
+    finished: "{status}; read up to cursor {cursor}."
+    no_new_output: "(no new output yet)"
+
+  task_list:
+    description: "List all background tasks with their status (running/completed/failed/stopped) and exit codes. Use this to check on tasks started with run_in_background."
+
+  task_stop:
+    description: "Stop a running background task: sends SIGTERM to its process group, then SIGKILL after a 3s grace period."
+    missing_task_id: "Missing 'task_id' parameter"
+    stopped: "Task {task_id} stopped (exit code {exit_code})."
     read_only:
       blocked: "Blocked: command is not read-only ({reason})"
       unparseable: "Blocked: command could not be analyzed as read-only"

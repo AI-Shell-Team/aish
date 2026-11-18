@@ -1559,6 +1559,9 @@ impl AishShell {
         )));
         tool_registry.register(Box::new(aish_tools::EnterPlanModeTool::new()));
         tool_registry.register(Box::new(aish_tools::ExitPlanModeTool::new()));
+        tool_registry.register(Box::new(aish_tools::TaskOutputTool::new()));
+        tool_registry.register(Box::new(aish_tools::TaskListTool::new()));
+        tool_registry.register(Box::new(aish_tools::TaskStopTool::new()));
         // AgentTool is registered after skill loading so the parent session already
         // has SkillTool when general-purpose / troubleshoot inherit the tool pool.
 

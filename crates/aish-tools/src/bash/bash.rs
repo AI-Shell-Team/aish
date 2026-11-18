@@ -466,6 +466,38 @@ impl BashTool {
         }
     }
 
+    /// Start a command as a background task. Returns immediately with the
+    /// task id; output is retrieved later via `task_output` / `task_list`.
+    fn execute_background(command: &str) -> ToolResult {
+        match crate::task::spawn_background(command) {
+            Ok(task_id) => {
+                let output_path = crate::task::list_tasks()
+                    .into_iter()
+                    .find(|t| t.task_id == task_id)
+                    .map(|t| t.output_path)
+                    .unwrap_or_default();
+                let args: std::collections::HashMap<String, String> = [
+                    ("task_id", task_id.as_str()),
+                    ("output_path", output_path.as_str()),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+                let hint = aish_i18n::t_with_args("tools.bash.background_started", &args);
+                ToolResult {
+                    ok: true,
+                    output: hint,
+                    meta: Some(serde_json::json!({
+                        "task_id": task_id,
+                        "output_path": output_path,
+                        "background": true,
+                    })),
+                }
+            }
+            Err(e) => ToolResult::error(e),
+        }
+    }
+
     /// Execute via PersistentPty — supports Ctrl+Z/bg/fg job control.
     fn execute_via_persistent_pty(
         &self,
@@ -736,6 +768,18 @@ impl Tool for BashTool {
 
         // Restore secret placeholders before execution.
         let (command, _restore_count) = self.restore_secrets(raw_command);
+
+        // Background path: start the command and return immediately.
+        let run_in_background = args
+            .get("run_in_background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if run_in_background {
+            let mut result = Self::execute_background(&command);
+            let (redacted, _) = self.redact_output(&result.output);
+            result.output = redacted;
+            return result;
+        }
 
         // Try PersistentPty path first (supports Ctrl+Z/bg/fg).
         let pty_arc = {

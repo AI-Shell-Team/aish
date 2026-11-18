@@ -40,6 +40,10 @@ pub(crate) fn parameters() -> serde_json::Value {
                 "type": "integer",
                 "minimum": 1,
                 "description": "Timeout in seconds. If omitted, the command is bounded by an internal default (3600s) and can be cancelled anytime."
+            },
+            "run_in_background": {
+                "type": "boolean",
+                "description": "If true, start the command as a background task and return immediately with a task_id. Read output later with task_output; list tasks with task_list; stop with task_stop."
             }
         },
         "required": ["command"]
