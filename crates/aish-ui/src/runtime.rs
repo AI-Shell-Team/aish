@@ -59,22 +59,28 @@ impl PanelRuntime {
         let (cols, rows) = terminal::size()?;
         let height = component.desired_height(cols, rows);
         let _guard = TerminalGuard::enter()?;
-        // Use `Viewport::Fixed` instead of `Viewport::Inline`. Inline calls
-        // `append_lines(height-1)` which prints `\n` bytes to reserve screen
-        // space; when the panel sits near the bottom of the terminal those
-        // newlines scroll the screen, and the cleanup on exit cannot undo the
-        // scroll — leaving blank lines. Fixed needs no scroll reservation.
+        // Reserve the panel's rows by scrolling instead of `Viewport::Inline`.
+        // Inline's `append_lines` scrolled too, but `Terminal::clear()` then
+        // restored the cursor to the bottom of the panel and the next
+        // `read_line` redrew the prompt several rows lower, leaving blank
+        // lines above it.
         //
-        // Shared with the slash/@ popups so the anchor and erase policies
-        // cannot drift apart: the popup is lifted (not shrunk) when the rows
-        // below the cursor cannot hold it, and a failed cursor query docks it
-        // at the bottom rows instead of anchoring at row 0.
-        let (mut start_row, mut clamped_height) = crate::slash_input::popup_area(rows, height);
+        // Shared with the slash/@ popups so the placement and erase policies
+        // cannot drift apart: like `Viewport::Inline`, the screen scrolls by
+        // the shortfall rather than the panel shrinking or content above it
+        // being erased. A failed cursor query docks at the bottom rows.
+        let anchor_row = crate::slash_input::cursor_anchor_row(rows, height);
+        let (mut start_row, mut clamped_height) = {
+            let (scroll, start_row, height) =
+                crate::slash_input::fit_popup(anchor_row, rows, height);
+            let _ = crate::slash_input::scroll_up(scroll, rows);
+            (start_row, height)
+        };
         // Wipe stale terminal content in the panel region before the first
         // draw: a Fixed viewport only repaints its own cells, so any
         // previously printed command output would otherwise show through the
-        // gaps between panel rows.
-        let _ = crate::slash_input::clear_rows(start_row, clamped_height);
+        // gaps between panel rows. Bounded to the panel's own rows.
+        crate::slash_input::clear_rows(start_row, clamped_height)?;
         let area = Rect::new(0, start_row, cols, clamped_height);
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::with_options(
@@ -105,13 +111,14 @@ impl PanelRuntime {
             // A `Viewport::Fixed` is never auto-resized by ratatui, so a
             // window change would leave the panel drawn at stale absolute
             // rows (and the exit cleanup erasing rows that no longer exist).
-            // Rebuild it at the new geometry.
+            // Re-fit it from the original anchor instead.
             if matches!(event, event::Event::Resize(..)) {
                 let _ = crate::slash_input::clear_rows(start_row, clamped_height);
                 drop(terminal);
                 let (c, r) = terminal::size()?;
                 let h = component.desired_height(c, r);
-                let (row, height) = crate::slash_input::popup_area(r, h);
+                let (scroll, row, height) = crate::slash_input::fit_popup(anchor_row, r, h);
+                let _ = crate::slash_input::scroll_up(scroll, r);
                 let _ = crate::slash_input::clear_rows(row, height);
                 start_row = row;
                 clamped_height = height;

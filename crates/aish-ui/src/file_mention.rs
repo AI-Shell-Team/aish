@@ -161,17 +161,14 @@ impl FileMentionSession {
                 viewport_height = desired;
                 terminal = open_inline_terminal(viewport_height)?;
             }
-            let _ = terminal.autoresize();
             terminal.draw(|frame| self.render(frame, frame.area()))?;
 
             let event = event::read()?;
             // A `Viewport::Fixed` is never auto-resized by ratatui, so a
             // window change would leave the popup drawn at stale absolute
-            // rows. Rebuild it at the new geometry instead.
+            // rows. Re-fit it from the stored anchor instead.
             if matches!(event, Event::Resize(..)) {
-                let _ = terminal.clear();
-                drop(terminal);
-                terminal = open_inline_terminal(viewport_height)?;
+                terminal.resize(viewport_height)?;
                 continue;
             }
             if let Some(result) = self.handle_event(event) {
