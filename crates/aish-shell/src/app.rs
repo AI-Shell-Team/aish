@@ -3143,6 +3143,10 @@ impl AishShell {
             // Periodic live-session resource check: warn when another
             // detached session hogs CPU or memory.
             self.check_live_session_resources();
+            // Background task completions: drain the task registry's notice
+            // queue and inject a context entry per finished task so the AI
+            // sees the outcome on its next turn without polling.
+            self.drain_background_task_notices();
             // Check for skill hot-reload changes
             if let Some(ref reloader) = self.skill_hot_reloader {
                 let affected = reloader.apply_changes(&mut self.skill_manager);
@@ -6920,6 +6924,23 @@ impl AishShell {
     /// without constructing a full `AishShell`.
     fn render_audit_markdown(&self, events: &[aish_session::AuditEventRecord]) -> String {
         render_audit_markdown_impl(events)
+    }
+
+    /// Drain background task completions and inject a context notice per
+    /// finished task. Called once per REPL tick; also invoked at the start
+    /// of each AI turn (via `AiHandler::inject_background_task_notices`) to
+    /// cover completions that landed while an AI turn was in flight.
+    fn drain_background_task_notices(&mut self) {
+        let finished = aish_tools::task::drain_finished_tasks();
+        for info in &finished {
+            let notice = aish_tools::task::format_finished_notice(info);
+            self.ai_handler.add_shell_context(&notice);
+            tracing::info!(
+                task_id = %info.task_id,
+                status = %info.status,
+                "background task finished; notice injected into AI context"
+            );
+        }
     }
 
     /// Throttled live-session resource check. Warns in the current session

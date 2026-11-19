@@ -339,6 +339,26 @@ impl AiHandler {
         self.context_manager.trim();
     }
 
+    /// Drain background task completions and inject a context notice per
+    /// finished task. Called at the start of every AI turn so the model
+    /// learns about tasks that finished while it was not running.
+    pub fn inject_background_task_notices(&mut self) {
+        let finished = aish_tools::task::drain_finished_tasks();
+        for info in &finished {
+            let notice = aish_tools::task::format_finished_notice(info);
+            self.context_manager
+                .add_message("user", &notice, MemoryType::Shell);
+            tracing::info!(
+                task_id = %info.task_id,
+                status = %info.status,
+                "background task notice injected at AI turn start"
+            );
+        }
+        if !finished.is_empty() {
+            self.context_manager.trim();
+        }
+    }
+
     pub fn context_messages_snapshot(&self) -> Vec<ContextMessage> {
         self.context_manager.messages_snapshot()
     }
@@ -631,6 +651,10 @@ impl AiHandler {
 
     /// Handle an AI question: send to LLM and return the response text.
     pub async fn handle_question(&mut self, question: &str) -> aish_core::Result<String> {
+        // Step 0: Surface background tasks that finished since the last REPL
+        // tick (covers completions during a previous in-flight AI turn).
+        self.inject_background_task_notices();
+
         // Step 1: Process @skill references in the question
         let question_processed = self.inject_skill_prefix(question);
 

@@ -79,12 +79,16 @@ impl Tool for TaskOutputTool {
         match task_output(task_id, max_bytes) {
             Ok((text, cursor, status)) => {
                 let header = match status {
-                    TaskStatus::Running => {
-                        t("tools.task_output.running", &[("cursor", &cursor.to_string())])
-                    }
+                    TaskStatus::Running => t(
+                        "tools.task_output.running",
+                        &[("cursor", &cursor.to_string())],
+                    ),
                     _ => t(
                         "tools.task_output.finished",
-                        &[("status", &status.to_string()), ("cursor", &cursor.to_string())],
+                        &[
+                            ("status", &status.to_string()),
+                            ("cursor", &cursor.to_string()),
+                        ],
                     ),
                 };
                 let body = if text.is_empty() {
@@ -155,10 +159,7 @@ impl Tool for TaskListTool {
                 .unwrap_or_else(|| "-".to_string());
             lines.push(format!(
                 "{}\t{}\texit={}\t{}",
-                task.task_id,
-                task.status,
-                exit,
-                task.command
+                task.task_id, task.status, exit, task.command
             ));
         }
         ToolResult {
@@ -288,7 +289,11 @@ mod tests {
         let tool = TaskOutputTool::new();
         let result = tool.execute(serde_json::json!({"task_id": id}));
         assert!(result.ok);
-        assert!(result.output.contains("tool-out-42"), "got: {}", result.output);
+        assert!(
+            result.output.contains("tool-out-42"),
+            "got: {}",
+            result.output
+        );
         assert!(result.output.contains("completed"));
     }
 

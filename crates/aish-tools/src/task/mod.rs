@@ -78,6 +78,10 @@ struct RegistryInner {
     tasks: HashMap<String, TaskInfo>,
     /// Live child handles keyed by task_id (removed once reaped).
     children: HashMap<String, Arc<Mutex<Option<Child>>>>,
+    /// Tasks finished since the last `drain_finished_tasks` call. The shell
+    /// REPL drains this each tick and injects notices into the AI context,
+    /// mirroring how opencode surfaces background completions to the model.
+    pending_finished: Vec<TaskInfo>,
 }
 
 /// Process-global registry so task state outlives individual AI turns.
@@ -130,8 +134,8 @@ pub fn spawn_background(command: &str) -> Result<String, String> {
     let log_path = task_log_path(&task_id);
     fs::create_dir_all(task_log_dir())
         .map_err(|e| format!("failed to create task log dir: {e}"))?;
-    let log_file = fs::File::create(&log_path)
-        .map_err(|e| format!("failed to create task log file: {e}"))?;
+    let log_file =
+        fs::File::create(&log_path).map_err(|e| format!("failed to create task log file: {e}"))?;
     let log_file_err = log_file
         .try_clone()
         .map_err(|e| format!("failed to clone log file handle: {e}"))?;
@@ -218,6 +222,12 @@ pub fn spawn_background(command: &str) -> Result<String, String> {
                 info.finished_at_ms = Some(finished);
             }
             reg.children.remove(&watch_id);
+            // Queue a completion notice for the shell REPL to inject into the
+            // AI context on its next tick (pending_finished ordering: newest
+            // last so drained notices read chronologically).
+            if let Some(info) = reg.tasks.get(&watch_id).cloned() {
+                reg.pending_finished.push(info);
+            }
         }
     });
 
@@ -253,7 +263,9 @@ pub fn list_tasks() -> Vec<TaskInfo> {
     all.sort_by(|a, b| {
         let a_run = a.status == TaskStatus::Running;
         let b_run = b.status == TaskStatus::Running;
-        b_run.cmp(&a_run).then(b.started_at_ms.cmp(&a.started_at_ms))
+        b_run
+            .cmp(&a_run)
+            .then(b.started_at_ms.cmp(&a.started_at_ms))
     });
     all
 }
@@ -281,7 +293,9 @@ pub fn task_output(task_id: &str, max_bytes: usize) -> Result<(String, u64, Task
         .map_err(|e| format!("failed to seek task log: {e}"))?;
 
     let mut buf = vec![0u8; max_bytes];
-    let n = handle.read(&mut buf).map_err(|e| format!("read failed: {e}"))?;
+    let n = handle
+        .read(&mut buf)
+        .map_err(|e| format!("read failed: {e}"))?;
     buf.truncate(n);
     let (text_bytes, _truncated) = aish_pty::truncate_utf8_safe(&buf, n);
     let text = String::from_utf8_lossy(&text_bytes).to_string();
@@ -374,9 +388,43 @@ pub fn task_stop(task_id: &str) -> Result<i32, String> {
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0),
             );
+            // task_stop is model-initiated: the stop tool result already
+            // reports the outcome to the model, so no completion notice is
+            // queued here (avoids duplicate context injection).
         }
     }
     Ok(exit_code)
+}
+
+/// Drain tasks that finished since the previous call (chronological order).
+///
+/// The shell REPL calls this once per loop iteration and injects a notice
+/// into the AI context for each drained task, so the model learns about
+/// background completions without polling. Also covers tasks the watcher
+/// finalized while an AI turn was in flight.
+pub fn drain_finished_tasks() -> Vec<TaskInfo> {
+    let reg = registry();
+    let mut reg = reg.lock();
+    std::mem::take(&mut reg.pending_finished)
+}
+
+/// Render a context notice for a finished task (injected into the AI
+/// conversation as a user-role shell context message).
+pub fn format_finished_notice(info: &TaskInfo) -> String {
+    let exit = info
+        .exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "<background-task state=\"{}\">\ntask_id: {}\ncommand: {}\nexit_code: {}\noutput_file: {}\n</background-task>\n\
+         The background task above finished on its own. If its result is needed for the user's request, read the output with task_output(task_id=\"{}\") before answering.",
+        info.status,
+        info.task_id,
+        info.command,
+        exit,
+        info.output_path,
+        info.task_id
+    )
 }
 
 #[cfg(test)]
@@ -477,5 +525,54 @@ mod tests {
         assert_eq!(tasks.len(), 64);
         assert!(tasks.contains_key("t79"), "newest must survive");
         assert!(!tasks.contains_key("t0"), "oldest must be pruned");
+    }
+
+    #[test]
+    fn drain_returns_finished_tasks_once() {
+        let id = spawn_background("echo drain-me").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let info = list_tasks().into_iter().find(|t| t.task_id == id).unwrap();
+            if info.status != TaskStatus::Running {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // First drain must contain the task.
+        let drained = drain_finished_tasks();
+        assert!(
+            drained.iter().any(|t| t.task_id == id),
+            "drain should include {id}: {:?}",
+            drained
+                .iter()
+                .map(|t| t.task_id.clone())
+                .collect::<Vec<_>>()
+        );
+        // Second drain must be empty (no re-notify).
+        assert!(
+            !drain_finished_tasks().iter().any(|t| t.task_id == id),
+            "drain must be one-shot"
+        );
+    }
+
+    #[test]
+    fn format_notice_contains_key_fields() {
+        let info = TaskInfo {
+            task_id: "t1234".to_string(),
+            command: "sleep 5".to_string(),
+            status: TaskStatus::Completed,
+            exit_code: Some(0),
+            output_path: "/tmp/x.log".to_string(),
+            cursor: 0,
+            started_at_ms: 0,
+            finished_at_ms: Some(1),
+        };
+        let notice = format_finished_notice(&info);
+        assert!(notice.contains("<background-task state=\"completed\">"));
+        assert!(notice.contains("task_id: t1234"));
+        assert!(notice.contains("command: sleep 5"));
+        assert!(notice.contains("exit_code: 0"));
+        assert!(notice.contains("task_output"));
     }
 }

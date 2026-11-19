@@ -888,6 +888,12 @@ fn is_transient_system(content: &str) -> bool {
 }
 
 fn compact_shell_content(content: &str) -> Option<String> {
+    // Background-task completion notices are high-value signals injected for
+    // the model; compacting them would erase the very block the model is
+    // supposed to read.
+    if content.contains("<background-task") {
+        return None;
+    }
     if content.len() <= 512 && !is_low_value_output(content) {
         return None;
     }
@@ -1384,6 +1390,32 @@ mod tests {
                 | ContextPressureLevel::AutoCompact
                 | ContextPressureLevel::Blocking
         ));
+    }
+
+    #[test]
+    fn microcompact_preserves_background_task_notice() {
+        let mut cm = ContextManager::new();
+        cm.set_budget_policy(ContextBudgetPolicy {
+            shell_keep_recent_commands: 1,
+            enable_token_estimation: false,
+            ..ContextBudgetPolicy::default()
+        });
+        let notice = format!(
+            "<background-task state=\"completed\">\ntask_id: {}\ncommand: sleep 6 && echo done\nexit_code: 0\noutput_file: /tmp/aish-bg-tasks/x.log\n</background-task>\n{}",
+            "t1abcdef",
+            "filler ".repeat(200)
+        );
+        cm.add_message("user", &notice, MemoryType::Shell);
+        cm.add_message(
+            "user",
+            "Command: uptime\n<stdout>recent output should stay</stdout>\n<return_code>0</return_code>",
+            MemoryType::Shell,
+        );
+
+        let report = cm.microcompact();
+        assert_eq!(report.changed_messages, 0);
+        assert!(cm.messages[0].content.contains("<background-task"));
+        assert!(cm.messages[0].content.contains("exit_code: 0"));
     }
 
     #[test]

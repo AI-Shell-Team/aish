@@ -50,7 +50,10 @@ fn smoke_full_background_flow() {
         "run_in_background": true
     }));
     assert!(start2.ok);
-    let id2 = start2.meta.as_ref().unwrap()["task_id"].as_str().unwrap().to_string();
+    let id2 = start2.meta.as_ref().unwrap()["task_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     thread::sleep(Duration::from_millis(200));
     let stop = TaskStopTool::new().execute(serde_json::json!({"task_id": id2}));
     assert!(stop.ok, "stop failed: {}", stop.output);
