@@ -418,6 +418,22 @@ pub fn render_prompt(
     };
     prompt.push_str(&format!("{} ", badge));
 
+    // Background task badge: visible count of still-running tasks so the
+    // user knows completions may arrive (and that AI context will be
+    // updated) without polling task_list.
+    let running = aish_tools::task::list_tasks()
+        .iter()
+        .filter(|t| t.status == aish_tools::task::TaskStatus::Running)
+        .count();
+    if running > 0 {
+        let mut args = HashMap::new();
+        args.insert("count".to_string(), running.to_string());
+        prompt.push_str(&format!(
+            "{} ",
+            theme::warning(&t_with_args("shell.background_task.running_badge", &args))
+        ));
+    }
+
     // Abbreviated path (muted)
     let abbreviated = abbreviate_path(cwd, &home);
     prompt.push_str(&theme::muted(&abbreviated));

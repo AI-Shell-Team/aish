@@ -6935,6 +6935,21 @@ impl AishShell {
         for info in &finished {
             let notice = aish_tools::task::format_finished_notice(info);
             self.ai_handler.add_shell_context(&notice);
+            // Visible completion line for the user: the context injection is
+            // silent (the model sees it next turn), so surface the event
+            // here instead of leaving the prompt unchanged.
+            let exit = info
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let mut args = std::collections::HashMap::new();
+            args.insert("task_id".to_string(), info.task_id.clone());
+            args.insert("exit_code".to_string(), exit);
+            println!(
+                "{}",
+                theme::success(&t_with_args("shell.background_task.finished_line", &args))
+            );
+            let _ = io::stdout().flush();
             tracing::info!(
                 task_id = %info.task_id,
                 status = %info.status,

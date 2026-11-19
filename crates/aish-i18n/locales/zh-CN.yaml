@@ -345,6 +345,10 @@ shell:
     version_line: "新版本 {latest} 可用"
     run_prefix: "升级命令："
 
+  background_task:
+    running_badge: "⏳{count}个后台任务"
+    finished_line: "✔ 后台任务完成 {task_id}（exit={exit_code}），输出已注入 AI 上下文"
+
   # 通用错误消息
   general_error: "错误: {error}"
   readline_init_failed: "初始化 readline 失败: {error}"

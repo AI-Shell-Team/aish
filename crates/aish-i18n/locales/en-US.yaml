@@ -345,6 +345,10 @@ shell:
     version_line: "New version {latest} is available"
     run_prefix: "Run:"
 
+  background_task:
+    running_badge: "⏳{count} bg task(s)"
+    finished_line: "✔ background task {task_id} finished (exit={exit_code}); output injected into AI context"
+
   # General error messages
   general_error: "error: {error}"
   readline_init_failed: "Failed to initialize readline: {error}"
