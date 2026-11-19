@@ -38,6 +38,9 @@ MANIFEST
 *.manifest
 *.spec.backup
 
+# Local aish runtime data (plan artifacts written by /plan)
+.aish/
+
 # Debian packaging build artifacts (debhelper)
 debian/.debhelper/
 debian/debhelper-build-stamp

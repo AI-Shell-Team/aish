@@ -195,10 +195,16 @@ impl SlashInputSession {
                 viewport_height = desired_height;
                 terminal = open_inline_terminal(viewport_height)?;
             }
-            let _ = terminal.autoresize();
             terminal.draw(|frame| self.render(frame, frame.area()))?;
 
             let event = event::read()?;
+            // A `Viewport::Fixed` is never auto-resized by ratatui, so a
+            // window change would leave the popup drawn at stale absolute
+            // rows. Re-fit it from the stored anchor instead.
+            if matches!(event, Event::Resize(..)) {
+                terminal.resize(viewport_height)?;
+                continue;
+            }
             if let Some(result) = self.handle_event(event) {
                 break result;
             }
@@ -207,7 +213,6 @@ impl SlashInputSession {
         // All terminal cleanup MUST happen while still in raw mode.
         // If terminal is dropped after termios restore, its Drop impl may
         // write escape sequences in cooked mode, corrupting the terminal
-        // and causing the next SlashInputSession invocation to hang.
         let _ = terminal.clear();
         drop(terminal);
         drop(_guard);
@@ -700,15 +705,313 @@ pub(crate) fn drain_pending_events() -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn open_inline_terminal(
+/// Inline popup terminal docked at an absolute terminal row.
+///
+/// Wraps the ratatui terminal together with the rows it occupies so the
+/// popup can erase exactly its own rows and park the cursor back on
+/// `start_row` when it closes.
+pub(crate) struct InlineTerminal {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    /// Absolute terminal row of the popup's first line.
+    start_row: u16,
+    /// Number of rows the popup occupies.
     height: u16,
-) -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    Terminal::with_options(
+    /// Row the popup should be anchored at when the terminal is resized.
+    /// This is the prompt row after the initial scroll reservation; content
+    /// above it lives in the scrollback buffer and is never destroyed.
+    anchor_row: u16,
+}
+
+impl InlineTerminal {
+    /// Redraw the popup contents.
+    pub(crate) fn draw<F>(&mut self, render: F) -> io::Result<()>
+    where
+        F: FnOnce(&mut ratatui::Frame<'_>),
+    {
+        self.terminal.draw(render)?;
+        Ok(())
+    }
+
+    /// Rebuild the viewport after a terminal resize.
+    ///
+    /// A `Viewport::Fixed` is never auto-resized by ratatui, so drawing would
+    /// keep targeting rows that no longer exist. Re-runs the reservation from
+    /// the stored anchor and swaps in a fresh terminal.
+    pub(crate) fn resize(&mut self, height: u16) -> io::Result<()> {
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        let (scroll, start_row, clamped_height) = fit_popup(self.anchor_row, rows, height);
+        // Erase the old popup region, clipped to the rows that still exist: a
+        // VT cursor move past the bottom edge stops at the last row, so an
+        // unclipped erase after a shrink would clear whatever output now sits
+        // there.
+        let old_end = self.start_row.saturating_add(self.height).min(rows);
+        if self.start_row < old_end {
+            clear_rows(self.start_row, old_end - self.start_row)?;
+        }
+        // Propagate the reservation failure: on a partial scroll the rows the
+        // popup is about to claim have not been freed yet, and clearing them
+        // would erase command output.
+        scroll_up(scroll, rows)?;
+        clear_rows(start_row, clamped_height)?;
+        self.terminal = Terminal::with_options(
+            CrosstermBackend::new(io::stdout()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, start_row, cols, clamped_height)),
+            },
+        )?;
+        self.start_row = start_row;
+        self.height = clamped_height;
+        // The prompt moved with the scroll, so the next refit must anchor at
+        // the post-scroll row: re-anchoring at the pre-scroll row would scroll
+        // again on every resize event (including width-only changes).
+        self.anchor_row = start_row;
+        Ok(())
+    }
+
+    /// Erase every popup row and move the cursor back to `start_row`.
+    ///
+    /// `Terminal::clear()` is deliberately NOT used here: on ratatui-core
+    /// 0.1.2 it snapshots the cursor via DSR and restores it afterwards to
+    /// wherever the last `draw` left it (the bottom of the popup), so the
+    /// caller's next `read_line` redraws the prompt several rows below the
+    /// original position and leaves blank lines above it.
+    pub(crate) fn clear(&mut self) -> io::Result<()> {
+        clear_rows(self.start_row, self.height)
+    }
+}
+
+/// Erase `height` screen rows starting at `start_row` and park the cursor on
+/// `start_row`.
+///
+/// Shared by [`InlineTerminal`] (open and close) and `PanelRuntime` so the
+/// popup and panel cleanup policies cannot drift apart. The erase is bounded
+/// to the rows the popup actually owns: content below it is left untouched.
+/// Best-effort — a write failure aborts the remaining rows, but the cursor is
+/// still parked and the caller decides whether that is fatal (`PanelRuntime`
+/// ignores it and still returns its outcome).
+pub(crate) fn clear_rows(start_row: u16, height: u16) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    let end = start_row.saturating_add(height.max(1));
+    let result = (start_row..end).try_for_each(|y| {
+        execute!(
+            stdout,
+            cursor::MoveTo(0, y),
+            terminal::Clear(terminal::ClearType::CurrentLine)
+        )
+    });
+    // Park the cursor even when a row write failed: the caller's prompt is
+    // drawn next and must not land inside the erased region.
+    let park = execute!(stdout, cursor::MoveTo(0, start_row));
+    stdout.flush()?;
+    result.and(park)
+}
+
+/// Scroll the screen up by `lines` rows so the popup has room below the
+/// prompt.
+///
+/// Moving off the last row pushes the top rows into the terminal's scrollback
+/// buffer instead of destroying them, which is what `Viewport::Inline` used to
+/// do via `append_lines`. Erasing the rows in place would permanently lose
+/// command output, so scrolling is the only non-destructive way to make room.
+///
+/// Plain `\n` bytes are used deliberately: `MoveToNextLine` (`ESC[1E`) is a
+/// cursor motion, so on the last row it does nothing. Only a newline at the
+/// bottom margin triggers the terminal's scroll, moving the top rows into
+/// scrollback.
+pub(crate) fn scroll_up(lines: u16, rows: u16) -> io::Result<()> {
+    if lines == 0 {
+        return Ok(());
+    }
+    let mut stdout = io::stdout();
+    execute!(stdout, cursor::MoveTo(0, rows.saturating_sub(1)))?;
+    for _ in 0..lines {
+        stdout.write_all(b"\n")?;
+    }
+    stdout.flush()
+}
+
+/// Resolve the popup placement as `(scroll_lines, start_row, height)`.
+///
+/// The popup is docked at the anchor row when the remaining rows below can
+/// hold it; otherwise the screen is scrolled up by exactly the shortfall so
+/// the full height still fits and the rows above move into scrollback instead
+/// of being erased.
+///
+/// A failed cursor query (spawned PTYs, non-answering multiplexers) docks the
+/// popup at the bottom rows rather than anchoring at row 0, so the caller's
+/// pre-clear cannot wipe the whole screen.
+pub(crate) fn fit_popup(anchor_row: u16, rows: u16, height: u16) -> (u16, u16, u16) {
+    let rows = rows.max(1);
+    let height = height.clamp(1, rows);
+    let anchor = anchor_row.min(rows - 1);
+    let scroll = (anchor + height).saturating_sub(rows);
+    (scroll, anchor - scroll, height)
+}
+
+/// Cursor row queried from the terminal, falling back to the bottom rows when
+/// the DSR reply never arrives.
+pub(crate) fn cursor_anchor_row(rows: u16, height: u16) -> u16 {
+    let rows = rows.max(1);
+    crossterm::cursor::position()
+        .map(|(_, y)| y.min(rows - 1))
+        .unwrap_or_else(|_| rows.saturating_sub(height.clamp(1, rows)))
+}
+
+pub(crate) fn open_inline_terminal(height: u16) -> io::Result<InlineTerminal> {
+    // Reserve space by scrolling instead of switching to `Viewport::Inline`.
+    // Inline's `append_lines` did scroll (freeing the popup from the
+    // cursor-restore bug only after the fact), but `Terminal::clear()` then
+    // restored the cursor to the bottom of the popup and the next `read_line`
+    // redrew the prompt several rows lower, leaving blank lines above it.
+    // Here the reservation and the cleanup are both explicit.
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let anchor_row = cursor_anchor_row(rows, height);
+    let (scroll, start_row, clamped_height) = fit_popup(anchor_row, rows, height);
+    scroll_up(scroll, rows)?;
+    // Blank exactly the rows the popup owns so stale terminal content does not
+    // bleed through the gaps between its cells. Bounded to the popup: content
+    // below stays intact, content above was scrolled into scrollback.
+    clear_rows(start_row, clamped_height)?;
+    let area = Rect::new(0, start_row, cols, clamped_height);
+    let terminal = Terminal::with_options(
         CrosstermBackend::new(io::stdout()),
         TerminalOptions {
-            viewport: Viewport::Inline(height),
+            viewport: Viewport::Fixed(area),
         },
-    )
+    )?;
+    Ok(InlineTerminal {
+        terminal,
+        start_row,
+        height: clamped_height,
+        anchor_row: start_row,
+    })
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::fit_popup;
+
+    /// A popup that fits below the anchor needs no scroll and keeps its row.
+    #[test]
+    fn popup_fits_without_scrolling() {
+        let (scroll, start_row, height) = fit_popup(5, 24, 8);
+        assert_eq!((scroll, start_row, height), (0, 5, 8));
+    }
+
+    /// A popup on the last row scrolls the screen instead of shrinking: the
+    /// caller gets the full height and the rows above move to scrollback.
+    #[test]
+    fn popup_scrolls_instead_of_shrinking() {
+        let (scroll, start_row, height) = fit_popup(23, 24, 10);
+        assert_eq!(height, 10, "full height must be preserved");
+        assert_eq!(scroll, 9, "shortfall must be scrolled out");
+        assert_eq!(start_row, 14, "popup must be docked above the bottom");
+        assert!(start_row + height <= 24);
+    }
+
+    /// The scrolled-out rows are exactly the shortfall, so content that still
+    /// fits is never moved unnecessarily.
+    #[test]
+    fn scroll_amount_equals_shortfall() {
+        let (scroll, start_row, height) = fit_popup(20, 24, 10);
+        assert_eq!(scroll, 6);
+        assert_eq!(start_row, 14);
+        assert_eq!(height, 10);
+    }
+
+    /// A popup taller than the terminal is clamped; it then scrolls by
+    /// whatever the clamped height still cannot fit below the anchor.
+    #[test]
+    fn popup_taller_than_terminal_is_clamped() {
+        let (scroll, start_row, height) = fit_popup(3, 10, 40);
+        assert_eq!(height, 10, "height is clamped to the screen");
+        assert_eq!(scroll, 3, "shortfall is scrolled out");
+        assert_eq!(start_row, 0);
+    }
+
+    /// A popup taller than the terminal anchored at the top needs no scroll.
+    #[test]
+    fn clamped_popup_at_top_does_not_scroll() {
+        let (scroll, start_row, height) = fit_popup(0, 10, 40);
+        assert_eq!((scroll, start_row, height), (0, 0, 10));
+    }
+
+    /// A degenerate zero-row terminal must not panic or underflow.
+    #[test]
+    fn zero_height_terminal_yields_one_row() {
+        let (scroll, start_row, height) = fit_popup(0, 0, 8);
+        assert_eq!(height, 1);
+        assert_eq!(scroll, 0);
+        assert_eq!(start_row, 0);
+    }
+
+    /// A height-1 popup on the last row scrolls exactly one row.
+    #[test]
+    fn single_row_popup_at_bottom_scrolls_one() {
+        let (scroll, start_row, height) = fit_popup(23, 24, 1);
+        assert_eq!((scroll, start_row, height), (0, 23, 1));
+    }
+
+    /// Including the last row: anchor + height must never exceed the screen.
+    #[test]
+    fn popup_never_overflows_footer() {
+        for rows in 1..=60u16 {
+            for height in 1..=12u16 {
+                for anchor in 0..rows {
+                    let (scroll, start_row, h) = fit_popup(anchor, rows, height);
+                    assert_eq!(h, height.min(rows));
+                    assert_eq!(
+                        start_row + scroll,
+                        anchor.min(rows - 1),
+                        "scroll must exactly compensate the shift"
+                    );
+                    assert!(
+                        start_row + h <= rows,
+                        "rows={rows} height={height} anchor={anchor} -> {start_row}+{h}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Re-anchoring at the post-scroll row is idempotent: a second fit at the
+    /// same terminal height must not scroll again. Anchoring at the pre-scroll
+    /// row instead would keep scrolling on every resize event.
+    #[test]
+    fn refit_at_post_scroll_anchor_scrolls_once() {
+        let height = 9u16;
+        let rows = 24u16;
+        let anchor = 22u16;
+
+        let (scroll, start_row, _) = fit_popup(anchor, rows, height);
+        assert_eq!(scroll, 7);
+
+        // Second fit from the post-scroll row: nothing left to scroll.
+        let (scroll2, start_row2, _) = fit_popup(start_row, rows, height);
+        assert_eq!(scroll2, 0, "re-anchored refit must not scroll again");
+        assert_eq!(start_row2, start_row);
+
+        // Anchoring at the original row would have scrolled all over again.
+        let (scroll3, _, _) = fit_popup(anchor, rows, height);
+        assert_eq!(scroll3, 7, "stale anchor reproduces the bug");
+    }
+
+    /// Shrinking then growing back must not drift the popup upward: each step
+    /// re-anchors, so the popup returns to the same fitted row.
+    #[test]
+    fn resize_cycle_returns_to_same_row() {
+        let height = 9u16;
+        let mut anchor = 15u16;
+
+        let (scroll, row, _) = fit_popup(anchor, 20, height);
+        assert_eq!(scroll, 4);
+        anchor = row;
+        assert_eq!(anchor, 11);
+
+        let (scroll_up_back, row2, _) = fit_popup(anchor, 24, height);
+        assert_eq!(scroll_up_back, 0, "growing back needs no scroll");
+        assert_eq!(row2, 11, "popup stays where the scroll left it");
+    }
 }
 
 pub(crate) fn longest_common_prefix(names: &[&str]) -> String {
