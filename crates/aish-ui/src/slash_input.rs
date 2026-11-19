@@ -740,7 +740,17 @@ impl InlineTerminal {
     pub(crate) fn resize(&mut self, height: u16) -> io::Result<()> {
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let (scroll, start_row, clamped_height) = fit_popup(self.anchor_row, rows, height);
-        clear_rows(self.start_row, self.height)?;
+        // Erase the old popup region, clipped to the rows that still exist: a
+        // VT cursor move past the bottom edge stops at the last row, so an
+        // unclipped erase after a shrink would clear whatever output now sits
+        // there.
+        let old_end = self.start_row.saturating_add(self.height).min(rows);
+        if self.start_row < old_end {
+            clear_rows(self.start_row, old_end - self.start_row)?;
+        }
+        // Propagate the reservation failure: on a partial scroll the rows the
+        // popup is about to claim have not been freed yet, and clearing them
+        // would erase command output.
         scroll_up(scroll, rows)?;
         clear_rows(start_row, clamped_height)?;
         self.terminal = Terminal::with_options(
@@ -751,6 +761,10 @@ impl InlineTerminal {
         )?;
         self.start_row = start_row;
         self.height = clamped_height;
+        // The prompt moved with the scroll, so the next refit must anchor at
+        // the post-scroll row: re-anchoring at the pre-scroll row would scroll
+        // again on every resize event (including width-only changes).
+        self.anchor_row = start_row;
         Ok(())
     }
 
@@ -958,6 +972,45 @@ mod geometry_tests {
                 }
             }
         }
+    }
+
+    /// Re-anchoring at the post-scroll row is idempotent: a second fit at the
+    /// same terminal height must not scroll again. Anchoring at the pre-scroll
+    /// row instead would keep scrolling on every resize event.
+    #[test]
+    fn refit_at_post_scroll_anchor_scrolls_once() {
+        let height = 9u16;
+        let rows = 24u16;
+        let anchor = 22u16;
+
+        let (scroll, start_row, _) = fit_popup(anchor, rows, height);
+        assert_eq!(scroll, 7);
+
+        // Second fit from the post-scroll row: nothing left to scroll.
+        let (scroll2, start_row2, _) = fit_popup(start_row, rows, height);
+        assert_eq!(scroll2, 0, "re-anchored refit must not scroll again");
+        assert_eq!(start_row2, start_row);
+
+        // Anchoring at the original row would have scrolled all over again.
+        let (scroll3, _, _) = fit_popup(anchor, rows, height);
+        assert_eq!(scroll3, 7, "stale anchor reproduces the bug");
+    }
+
+    /// Shrinking then growing back must not drift the popup upward: each step
+    /// re-anchors, so the popup returns to the same fitted row.
+    #[test]
+    fn resize_cycle_returns_to_same_row() {
+        let height = 9u16;
+        let mut anchor = 15u16;
+
+        let (scroll, row, _) = fit_popup(anchor, 20, height);
+        assert_eq!(scroll, 4);
+        anchor = row;
+        assert_eq!(anchor, 11);
+
+        let (scroll_up_back, row2, _) = fit_popup(anchor, 24, height);
+        assert_eq!(scroll_up_back, 0, "growing back needs no scroll");
+        assert_eq!(row2, 11, "popup stays where the scroll left it");
     }
 }
 

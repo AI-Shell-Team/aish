@@ -69,13 +69,19 @@ impl PanelRuntime {
         // cannot drift apart: like `Viewport::Inline`, the screen scrolls by
         // the shortfall rather than the panel shrinking or content above it
         // being erased. A failed cursor query docks at the bottom rows.
-        let anchor_row = crate::slash_input::cursor_anchor_row(rows, height);
+        let mut anchor_row = crate::slash_input::cursor_anchor_row(rows, height);
         let (mut start_row, mut clamped_height) = {
             let (scroll, start_row, height) =
                 crate::slash_input::fit_popup(anchor_row, rows, height);
-            let _ = crate::slash_input::scroll_up(scroll, rows);
+            // Propagate: a partial scroll leaves the rows the panel is about to
+            // claim unfreed, so the clear below would erase command output.
+            crate::slash_input::scroll_up(scroll, rows)?;
             (start_row, height)
         };
+        // The panel (and the prompt under it) moved up with the scroll, so
+        // later refits must anchor here — re-anchoring at the pre-scroll row
+        // would scroll again on every resize, including width-only changes.
+        anchor_row = start_row;
         // Wipe stale terminal content in the panel region before the first
         // draw: a Fixed viewport only repaints its own cells, so any
         // previously printed command output would otherwise show through the
@@ -111,17 +117,29 @@ impl PanelRuntime {
             // A `Viewport::Fixed` is never auto-resized by ratatui, so a
             // window change would leave the panel drawn at stale absolute
             // rows (and the exit cleanup erasing rows that no longer exist).
-            // Re-fit it from the original anchor instead.
+            // Re-fit it from the stored anchor instead.
             if matches!(event, event::Event::Resize(..)) {
-                let _ = crate::slash_input::clear_rows(start_row, clamped_height);
                 drop(terminal);
                 let (c, r) = terminal::size()?;
                 let h = component.desired_height(c, r);
+                // Clip the old-region erase to the rows that still exist: a
+                // VT cursor move past the bottom edge stops at the last row,
+                // so an unclipped erase after a shrink would clear whatever
+                // output now sits there.
+                let old_end = start_row.saturating_add(clamped_height).min(r);
+                if start_row < old_end {
+                    let _ = crate::slash_input::clear_rows(start_row, old_end - start_row);
+                }
                 let (scroll, row, height) = crate::slash_input::fit_popup(anchor_row, r, h);
-                let _ = crate::slash_input::scroll_up(scroll, r);
+                // Propagate: a partial scroll leaves the panel's rows
+                // unfreed, so clearing them would erase command output.
+                crate::slash_input::scroll_up(scroll, r)?;
                 let _ = crate::slash_input::clear_rows(row, height);
                 start_row = row;
                 clamped_height = height;
+                // Anchor at the post-scroll row so a width-only resize does
+                // not scroll again.
+                anchor_row = row;
                 terminal = Terminal::with_options(
                     CrosstermBackend::new(io::stdout()),
                     TerminalOptions {
