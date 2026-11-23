@@ -167,7 +167,7 @@ impl ReadFileTool {
         offset: usize,
         limit: Option<usize>,
     ) -> ToolResult {
-        use std::io::{BufRead, BufReader};
+        use std::io::BufReader;
 
         let file = match std::fs::File::open(path) {
             Ok(f) => f,
@@ -187,14 +187,20 @@ impl ReadFileTool {
 
         // Skip `offset` lines, then collect up to `effective_limit` lines,
         // capping each materialized line at MAX_LINE_BYTES.
-        let mut collected: Vec<String> = Vec::with_capacity(effective_limit);
+        // Cap the pre-allocation too: a caller-supplied `limit` must not
+        // itself trigger a huge up-front allocation.
+        let mut collected: Vec<String> =
+            Vec::with_capacity(effective_limit.min(DEFAULT_TRUNCATE_LINES));
         let mut line_no = 0usize; // 0-based index of the current line
         let mut total_lines = 0usize;
         loop {
-            let mut raw = Vec::with_capacity(128);
-            let bytes_read = match reader.read_until(b'\n', &mut raw) {
-                Ok(0) => break,
-                Ok(n) => n,
+            // Read one line with bounded memory: `read_until` would buffer an
+            // entire pathological line (e.g. a multi-gigabyte single-line
+            // log) before truncating it, exhausting memory even when the
+            // caller asked for `limit=1`.
+            let (line_bytes, clipped) = match read_line_bounded(&mut reader) {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
                 Err(e) => {
                     let mut args_map = std::collections::HashMap::new();
                     args_map.insert("path".to_string(), path.to_string());
@@ -205,25 +211,9 @@ impl ReadFileTool {
                     ));
                 }
             };
-            let _ = bytes_read;
             total_lines += 1;
-            if raw.last() == Some(&b'\n') {
-                raw.pop();
-                if raw.last() == Some(&b'\r') {
-                    raw.pop();
-                }
-            }
             let in_window = line_no >= offset && collected.len() < effective_limit;
             if in_window {
-                // Truncate oversized lines so one pathological line cannot
-                // exhaust memory; the model can page with offset/limit but a
-                // single line is still capped.
-                let mut line_bytes = raw;
-                let mut clipped = false;
-                if line_bytes.len() > MAX_LINE_BYTES {
-                    line_bytes.truncate(MAX_LINE_BYTES);
-                    clipped = true;
-                }
                 let line = match String::from_utf8(line_bytes) {
                     Ok(s) => s,
                     Err(e) => {
@@ -295,6 +285,59 @@ impl ReadFileTool {
             ToolResult::success(format!("{}{}", tag_suffix, body))
         }
     }
+}
+
+/// Read one newline-terminated line while keeping memory bounded.
+///
+/// At most `MAX_LINE_BYTES + 2` bytes are retained (the two extra bytes
+/// accommodate a trailing `\r\n`); the remainder of an oversized line is
+/// consumed and discarded so line numbering, `offset` and `limit` stay
+/// correct. Returns `None` on a clean EOF between lines, otherwise the line
+/// bytes without their terminator plus whether the line had to be clipped.
+fn read_line_bounded<R: std::io::BufRead>(
+    reader: &mut R,
+) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    const RETAIN_LIMIT: usize = MAX_LINE_BYTES + 2;
+
+    let mut raw: Vec<u8> = Vec::with_capacity(128);
+    let mut saw_bytes = false;
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        saw_bytes = true;
+
+        let take = available
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(available.len(), |i| i + 1);
+        let room = RETAIN_LIMIT.saturating_sub(raw.len());
+        let keep = take.min(room);
+        raw.extend_from_slice(&available[..keep]);
+        let at_newline = available[take - 1] == b'\n';
+        reader.consume(take);
+        if at_newline {
+            break;
+        }
+    }
+
+    if !saw_bytes {
+        return Ok(None);
+    }
+
+    if raw.last() == Some(&b'\n') {
+        raw.pop();
+        if raw.last() == Some(&b'\r') {
+            raw.pop();
+        }
+    }
+    let clipped = raw.len() > MAX_LINE_BYTES;
+    if clipped {
+        raw.truncate(MAX_LINE_BYTES);
+    }
+    Ok(Some((raw, clipped)))
 }
 
 /// Path-restricted wrapper around [`ReadFileTool`] for SSH sessions.
@@ -467,6 +510,107 @@ mod tests {
         assert!(result.output.contains("line_01000"));
         assert!(result.output.contains("line_01002"));
         assert!(!result.output.contains("line_01003"));
+    }
+
+    #[test]
+    fn test_read_line_bounded_discards_rest_of_oversized_line() {
+        // A line far larger than the retention cap must still be consumed in
+        // full (so following lines are counted correctly) while only a
+        // bounded prefix stays in memory.
+        let input_len = MAX_READ_BYTES + 4 * 1024 * 1024;
+        let mut input = std::io::Cursor::new(vec![b'A'; input_len]);
+        let (line, clipped) = super::read_line_bounded(&mut input).unwrap().unwrap();
+        assert!(clipped, "oversized line should report clipping");
+        assert_eq!(line.len(), MAX_LINE_BYTES);
+        assert_eq!(
+            input.position() as usize,
+            input_len,
+            "the whole line must be consumed, not just the retained prefix"
+        );
+        assert!(
+            super::read_line_bounded(&mut input).unwrap().is_none(),
+            "clean EOF should yield None"
+        );
+    }
+
+    #[test]
+    fn test_read_line_bounded_keeps_short_lines_intact() {
+        let mut input = std::io::Cursor::new(b"hello\r\nworld\n".to_vec());
+
+        let (line, clipped) = super::read_line_bounded(&mut input).unwrap().unwrap();
+        assert_eq!(line, b"hello");
+        assert!(!clipped);
+
+        let (line, clipped) = super::read_line_bounded(&mut input).unwrap().unwrap();
+        assert_eq!(line, b"world");
+        assert!(!clipped);
+
+        assert!(super::read_line_bounded(&mut input).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_read_file_large_single_line_is_clipped() {
+        aish_i18n::set_locale("en-US");
+
+        let dir = temp_dir();
+        let file_path = dir.path().join("single-line.log");
+        // One line well past the large-file threshold; the old read_until
+        // path buffered the entire line before truncating it.
+        let mut content = vec![b'A'; MAX_READ_BYTES + 1024 * 1024];
+        content.push(b'\n');
+        fs::write(&file_path, &content).unwrap();
+
+        let tool = ReadFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "offset": 0,
+            "limit": 1
+        }));
+
+        assert!(result.ok, "{}", result.output);
+        assert!(
+            result.output.contains("line truncated"),
+            "expected truncation notice, got: {}",
+            result.output
+        );
+        // The returned payload is capped by MAX_LINE_BYTES regardless of how
+        // large the source line is.
+        assert!(
+            result.output.len() < MAX_LINE_BYTES + 1024,
+            "output should stay bounded, got {} bytes",
+            result.output.len()
+        );
+    }
+
+    #[test]
+    fn test_read_file_skips_oversized_line_outside_window() {
+        aish_i18n::set_locale("en-US");
+
+        let dir = temp_dir();
+        let file_path = dir.path().join("skip-single-line.log");
+        let mut content = vec![b'B'; MAX_READ_BYTES + 1024];
+        content.push(b'\n');
+        content.extend_from_slice(b"second-line\n");
+        fs::write(&file_path, &content).unwrap();
+
+        let tool = ReadFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "offset": 1,
+            "limit": 1
+        }));
+
+        assert!(result.ok, "{}", result.output);
+        assert!(
+            result.output.contains("second-line"),
+            "expected the second line, got: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("line truncated"),
+            "an out-of-window oversized line should not affect the result: {}",
+            result.output
+        );
     }
 
     #[test]
