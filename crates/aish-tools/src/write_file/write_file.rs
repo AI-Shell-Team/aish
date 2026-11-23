@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::Path;
 
 use aish_i18n;
@@ -135,17 +136,26 @@ impl Tool for WriteFileTool {
                 if !Path::new(path).exists() {
                     (None, false)
                 } else {
-                    match std::fs::read(path) {
-                        Ok(bytes) => {
-                            // Cap rollback memory: a prior larger than the
-                            // snapshot budget isn't tracked. The overwrite
-                            // still happens; it just isn't undoable —
-                            // preflight already surfaced a confirmation
-                            // prompt for this case (issue #454).
-                            if bytes.len() > SNAPSHOT_MAX_BYTES {
-                                (None, true)
-                            } else {
-                                (Some(bytes), false)
+                    // Read at most one byte past the snapshot budget.
+                    // `std::fs::read` would materialize the entire prior
+                    // file in memory before checking its length, so
+                    // overwriting a huge file could OOM even though the
+                    // snapshot is going to be discarded (issue #694).
+                    match std::fs::File::open(path) {
+                        Ok(file) => {
+                            let cap = (SNAPSHOT_MAX_BYTES + 1) as u64;
+                            let mut bytes = Vec::with_capacity(SNAPSHOT_MAX_BYTES + 1);
+                            match file.take(cap).read_to_end(&mut bytes) {
+                                Ok(_) if bytes.len() > SNAPSHOT_MAX_BYTES => {
+                                    // Prior larger than the snapshot budget:
+                                    // the overwrite still happens, it just
+                                    // isn't undoable — preflight already
+                                    // surfaced a confirmation prompt for
+                                    // this case (issue #454).
+                                    (None, true)
+                                }
+                                Ok(_) => (Some(bytes), false),
+                                Err(_) => (None, true),
                             }
                         }
                         Err(_) => (None, true),
@@ -317,6 +327,37 @@ mod tests {
             "anchor tag should still be refreshed"
         );
         drop(g);
+        assert_eq!(fs::read_to_string(&f).unwrap(), "small");
+    }
+
+    #[test]
+    fn write_file_huge_prior_skips_rollback_without_loading_it() {
+        // Regression for issue #694: the prior snapshot must be read with a
+        // bounded budget. A sparse file keeps the test cheap while still
+        // being far past SNAPSHOT_MAX_BYTES, so any full-file read would
+        // materialize megabytes before being discarded.
+        use std::sync::{Arc, Mutex};
+
+        use crate::fs::{SharedSnapshotStore, SnapshotStore};
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let f = dir.path().join("huge.log");
+        let file = fs::File::create(&f).unwrap();
+        file.set_len(8 * 1024 * 1024).unwrap();
+        drop(file);
+
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        let tool = WriteFileTool::with_store(store.clone());
+        let res = tool.execute(serde_json::json!({
+            "path": f.to_str().unwrap(),
+            "content": "small",
+        }));
+        assert!(res.ok, "{}", res.output);
+        assert_eq!(
+            store.lock().unwrap().history_len(),
+            0,
+            "oversized prior must not enter the rollback chain"
+        );
         assert_eq!(fs::read_to_string(&f).unwrap(), "small");
     }
 
