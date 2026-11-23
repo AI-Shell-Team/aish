@@ -15,6 +15,11 @@ use super::prompt;
 /// Maximum output length (matches main branch's 1000 chars).
 const MAX_OUTPUT_CHARS: usize = 1000;
 
+/// Maximum bytes retained from each child pipe. Output beyond this budget is
+/// read and discarded so a chatty child can neither fill the pipe (deadlock)
+/// nor exhaust parent memory before the result is truncated (issue #694).
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 64 * 1024;
+
 /// Default wall-clock budget for one snippet when the model omits
 /// `timeout`. Mirrors oh-my-pi's per-tool timeout policy: a default that
 /// bounds a stuck turn, a hard ceiling, and `0` = disabled (the model may
@@ -209,12 +214,12 @@ fn wait_with_cancel(
     let mut stderr_pipe = child.stderr.take();
     let out_jh = std::thread::spawn(move || {
         if let Some(p) = stdout_pipe.as_mut() {
-            drain_to(p, &out_tx);
+            drain_to(p, &out_tx, MAX_CAPTURED_OUTPUT_BYTES);
         }
     });
     let err_jh = std::thread::spawn(move || {
         if let Some(p) = stderr_pipe.as_mut() {
-            drain_to(p, &err_tx);
+            drain_to(p, &err_tx, MAX_CAPTURED_OUTPUT_BYTES);
         }
     });
     let mut cancelled = false;
@@ -257,16 +262,24 @@ fn wait_with_cancel(
 }
 
 /// Drain one pipe in small chunks so a chatty child cannot fill the 64 KiB
-/// pipe buffer and deadlock while we wait.
-fn drain_to(reader: &mut dyn Read, tx: &mpsc::Sender<Vec<u8>>) {
+/// pipe buffer and deadlock while we wait. At most `limit` bytes are kept;
+/// the rest of the stream is still consumed so the child never blocks on a
+/// full pipe.
+fn drain_to(reader: &mut dyn Read, tx: &mpsc::Sender<Vec<u8>>, limit: usize) {
     let mut buf = [0u8; 4096];
+    let mut retained = 0usize;
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                if tx.send(buf[..n].to_vec()).is_err() {
+                if retained >= limit {
+                    continue;
+                }
+                let take = n.min(limit - retained);
+                if tx.send(buf[..take].to_vec()).is_err() {
                     break;
                 }
+                retained += take;
             }
             Err(_) => break,
         }
@@ -396,6 +409,39 @@ mod tests {
         let r = run_python(&json!({"code": "print(1+1)"}), None);
         assert!(r.ok, "out: {}", r.output);
         assert_eq!(r.output.trim(), "2");
+    }
+
+    #[test]
+    fn drain_to_retains_only_the_capture_budget() {
+        // Issue #694: the pipe reader must keep draining (so the child never
+        // blocks) while retaining no more than the capture budget.
+        let mut reader = std::io::Cursor::new(vec![b'x'; 1024 * 1024]);
+        let (tx, rx) = mpsc::channel();
+        drain_to(&mut reader, &tx, 8 * 1024);
+        drop(tx);
+        let kept: Vec<u8> = rx.into_iter().flatten().collect();
+        assert_eq!(kept.len(), 8 * 1024);
+        assert_eq!(
+            reader.position(),
+            1024 * 1024,
+            "the source must still be drained completely"
+        );
+    }
+
+    #[test]
+    fn large_python_output_is_truncated_within_budget() {
+        let r = run_python(&json!({"code": "print('x' * 200000)"}), None);
+        assert!(r.ok, "out: {}", r.output);
+        assert!(
+            r.output.contains("Output truncated due to length"),
+            "expected truncation notice, got {} bytes",
+            r.output.len()
+        );
+        assert!(
+            r.output.len() < MAX_OUTPUT_CHARS + 100,
+            "output should stay bounded, got {} bytes",
+            r.output.len()
+        );
     }
 
     #[test]
