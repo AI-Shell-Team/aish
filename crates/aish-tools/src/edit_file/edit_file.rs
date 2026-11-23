@@ -255,13 +255,19 @@ impl EditFileTool {
             ));
         }
 
-        // Pass 1: stream the file once, tracking line terminator offsets,
-        // the total line count and the content hash. The window spans
-        // [window_start, window_end) with terminators excluded, so the
-        // spliced result never touches line endings or the final newline.
+        // Pass 1: stream the file once, tracking the total line count, the
+        // content hash and only the two newline offsets needed to locate the
+        // requested window. Storing every newline offset would grow with the
+        // line count: a large file made of short lines could exhaust memory
+        // before the edit even starts (issue #694).
         let mut hasher = StreamingTagHasher::new();
-        let mut nl_offsets: Vec<u64> = Vec::new();
         let mut file_len = 0u64;
+        let mut total_newlines = 0u64;
+        let mut last_newline: Option<u64> = None;
+        // 1-based number of the line currently being scanned.
+        let mut current_line = 1u64;
+        let mut window_start: Option<u64> = if start == 1 { Some(0) } else { None };
+        let mut window_end: Option<u64> = None;
         {
             let mut src = match std::fs::File::open(path) {
                 Ok(f) => f,
@@ -282,9 +288,23 @@ impl EditFileTool {
                     Ok(n) => {
                         hasher.update(&buf[..n]);
                         for (i, b) in buf[..n].iter().enumerate() {
-                            if *b == b'\n' {
-                                nl_offsets.push(file_len + i as u64);
+                            if *b != b'\n' {
+                                continue;
                             }
+                            let nl_offset = file_len + i as u64;
+                            total_newlines += 1;
+                            last_newline = Some(nl_offset);
+                            // `window_start` is the byte after the newline
+                            // that terminates line `start - 1`.
+                            if window_start.is_none() && current_line == start - 1 {
+                                window_start = Some(nl_offset + 1);
+                            }
+                            // `window_end` excludes the terminator of the
+                            // last line in the range.
+                            if current_line == end {
+                                window_end = Some(nl_offset);
+                            }
+                            current_line += 1;
                         }
                         file_len += n as u64;
                     }
@@ -301,13 +321,13 @@ impl EditFileTool {
             }
         }
 
-        let ends_with_newline = file_len > 0 && nl_offsets.last() == Some(&(file_len - 1));
+        let ends_with_newline = file_len > 0 && last_newline == Some(file_len - 1);
         let total_lines = if file_len == 0 {
             0
         } else if ends_with_newline {
-            nl_offsets.len() as u64
+            total_newlines
         } else {
-            nl_offsets.len() as u64 + 1
+            total_newlines + 1
         };
         if start > total_lines {
             let mut args_map = std::collections::HashMap::new();
@@ -319,22 +339,17 @@ impl EditFileTool {
             ));
         }
 
-        let end_idx = end.min(total_lines);
-        let window_start = if start == 1 {
-            0
-        } else {
-            nl_offsets[(start - 2) as usize] + 1
-        };
-        let window_end = if end_idx >= total_lines {
+        let window_start = window_start.unwrap_or(0);
+        let window_end = if end >= total_lines {
             // Last line: exclude its terminator when the file ends with
             // '\n' so the final newline is never touched by the edit.
             if ends_with_newline {
-                nl_offsets[(total_lines - 1) as usize]
+                last_newline.unwrap_or(file_len)
             } else {
                 file_len
             }
         } else {
-            nl_offsets[(end_idx - 1) as usize]
+            window_end.unwrap_or(file_len)
         };
 
         // Read only the window (bounded by the replacement, not the file).
@@ -767,6 +782,62 @@ mod tests {
             result_content.contains("data_line_19999"),
             "last line intact"
         );
+    }
+
+    #[test]
+    fn test_edit_file_line_range_many_short_lines() {
+        // Regression for issue #694: the scan must not retain one offset per
+        // newline. This file has 200k one-character lines, so the old
+        // `Vec<u64>` grew with the line count rather than the byte size.
+        let dir = temp_dir();
+        let file_path = dir.path().join("short_lines.txt");
+        let content = "x\n".repeat(200_000);
+        fs::write(&file_path, &content).unwrap();
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "x",
+            "new_string": "Y",
+            "start_line": 150_000,
+            "end_line": 150_000
+        }));
+
+        assert!(result.ok, "edit failed: {}", result.output);
+        let edited = fs::read_to_string(&file_path).unwrap();
+        let lines: Vec<&str> = edited.lines().collect();
+        assert_eq!(lines.len(), 200_000);
+        assert_eq!(lines[149_999], "Y");
+        assert_eq!(lines[0], "x");
+        assert_eq!(lines[199_999], "x");
+        assert_eq!(
+            edited.matches('\n').count(),
+            200_000,
+            "line terminators must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_edit_file_line_range_end_beyond_eof() {
+        // `end_line` past the last line is clamped. Cover both trailing
+        // newline shapes so the streamed window_end calculation stays exact.
+        for (content, expected) in [("a\nb\nc\n", "a\nB\nC\n"), ("a\nb\nc", "a\nB\nC")] {
+            let dir = temp_dir();
+            let file_path = dir.path().join("clamp.txt");
+            fs::write(&file_path, content).unwrap();
+
+            let tool = EditFileTool::new();
+            let result = tool.execute(serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "old_string": "b\nc",
+                "new_string": "B\nC",
+                "start_line": 2,
+                "end_line": 99
+            }));
+
+            assert!(result.ok, "edit failed for {content:?}: {}", result.output);
+            assert_eq!(fs::read_to_string(&file_path).unwrap(), expected);
+        }
     }
 
     #[test]
