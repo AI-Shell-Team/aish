@@ -224,8 +224,13 @@ struct TargetMetadata;
 #[cfg(unix)]
 fn existing_metadata(path: &Path) -> std::io::Result<Option<TargetMetadata>> {
     use std::os::unix::fs::MetadataExt;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return Ok(None);
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        // Only a genuinely missing target means "new file". Any other
+        // failure leaves us unable to capture the ACL, so fail before the
+        // replacement instead of silently dropping it (issue #691).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
     };
     Ok(Some(TargetMetadata {
         mode: meta.permissions().mode(),
@@ -726,5 +731,18 @@ mod tests {
             get_xattr(&cpath, &name).unwrap().as_deref(),
             Some(&value[..])
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn metadata_errors_other_than_not_found_are_propagated() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.conf");
+        assert!(existing_metadata(&missing).unwrap().is_none());
+
+        // `parent` is a regular file, so looking up `parent/child` fails
+        // with ENOTDIR rather than NotFound.
+        let parent = dir.path().join("parent");
+        fs::write(&parent, "x").unwrap();
+        assert!(existing_metadata(&parent.join("child")).is_err());
     }
 }

@@ -491,6 +491,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let file_path = dir.path().join("acl.conf");
         fs::write(&file_path, "port=8080\n").unwrap();
+        // Restrict the base mode and make the directory traversable so the
+        // only way uid 65534 can read the file is the ACL entry below.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600)).unwrap();
         let path = file_path.to_str().unwrap();
 
         let Ok(out) = Command::new("setfacl")
@@ -506,6 +511,10 @@ mod tests {
                 String::from_utf8_lossy(&out.stderr)
             );
             return;
+        }
+
+        if let Some(ok) = crate::fs::test_support::readable_as_uid(&file_path, 65534) {
+            assert!(ok, "test setup: ACL should grant uid 65534 read access");
         }
 
         let tool = WriteFileTool::new();
@@ -524,5 +533,11 @@ mod tests {
             acl.contains("user:65534:r--") || acl.contains("user:nobody:r--"),
             "write_file did not preserve the access ACL:\n{acl}"
         );
+        if let Some(ok) = crate::fs::test_support::readable_as_uid(&file_path, 65534) {
+            assert!(
+                ok,
+                "the preserved ACL should still let uid 65534 read the file"
+            );
+        }
     }
 }
