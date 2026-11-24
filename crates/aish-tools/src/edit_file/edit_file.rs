@@ -222,6 +222,27 @@ impl Tool for EditFileTool {
 }
 
 impl EditFileTool {
+    /// When editing through a symlink, atomic writes update the link's
+    /// destination and keep the link intact. Mention the real object in the
+    /// receipt so callers are not misled about what changed (issue #688).
+    fn symlink_write_note(path: &str) -> String {
+        let path = Path::new(path);
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return String::new();
+        };
+        if !meta.file_type().is_symlink() {
+            return String::new();
+        }
+        let target = std::fs::canonicalize(path)
+            .ok()
+            .or_else(|| std::fs::read_link(path).ok())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let mut args_map = std::collections::HashMap::new();
+        args_map.insert("target".to_string(), target);
+        aish_i18n::t_with_args("tools.fs.edit_file.symlink_target", &args_map)
+    }
+
     fn not_undoable_confirm(args: &serde_json::Value) -> PreflightResult {
         let path = args
             .get("path")
@@ -482,8 +503,9 @@ impl EditFileTool {
                 let mut args_map = std::collections::HashMap::new();
                 args_map.insert("path".to_string(), path.to_string());
                 ToolResult::success(format!(
-                    "{}{}",
+                    "{}{}{}",
                     aish_i18n::t_with_args("tools.fs.edit_file.edit_success", &args_map),
+                    Self::symlink_write_note(path),
                     tag_suffix
                 ))
             }
@@ -538,8 +560,9 @@ impl EditFileTool {
                 let mut args_map = std::collections::HashMap::new();
                 args_map.insert("path".to_string(), path.to_string());
                 ToolResult::success(format!(
-                    "{}{}",
+                    "{}{}{}",
                     aish_i18n::t_with_args("tools.fs.edit_file.edit_success", &args_map),
+                    Self::symlink_write_note(path),
                     tag_suffix
                 ))
             }
@@ -1233,5 +1256,68 @@ mod tests {
         let path = file_path.to_str().unwrap();
         assert_eq!(result.output, format!("'old_string' not found in {path}"));
         assert_eq!(fs::read_to_string(&file_path).unwrap(), prior);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn test_edit_file_through_symlink_preserves_link() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let real = dir.path().join("real.conf");
+        let link = dir.path().join("link.conf");
+        fs::write(&real, "port=8080\n").unwrap();
+        std::os::unix::fs::symlink("real.conf", &link).unwrap();
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": link.to_str().unwrap(),
+            "old_string": "8080",
+            "new_string": "9090"
+        }));
+
+        assert!(result.ok, "edit failed: {}", result.output);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink must survive the edit"
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "port=9090\n");
+        assert_eq!(fs::read_to_string(&link).unwrap(), "port=9090\n");
+        assert!(
+            result.output.contains("symlink target"),
+            "receipt should name the real target: {}",
+            result.output
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_edit_file_line_range_through_symlink_preserves_link() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let real = dir.path().join("real.conf");
+        let link = dir.path().join("link.conf");
+        fs::write(&real, "name=orders\nport=18088\nowner=ops\n").unwrap();
+        std::os::unix::fs::symlink("real.conf", &link).unwrap();
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": link.to_str().unwrap(),
+            "old_string": "18088",
+            "new_string": "18089",
+            "start_line": 2,
+            "end_line": 2
+        }));
+
+        assert!(result.ok, "edit failed: {}", result.output);
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(&real).unwrap(),
+            "name=orders\nport=18089\nowner=ops\n"
+        );
     }
 }
