@@ -1,7 +1,9 @@
 //! Atomic file replacement: write to a same-directory temp file, fsync, then
 //! rename over the target. Crash at any point leaves either the old file or
-//! the new one intact — never a truncated target. Permissions, owner and
-//! group of an existing target are carried over to the replacement.
+//! the new one intact — never a truncated target. Permissions, owner, group
+//! and extended attributes (including POSIX ACLs) of an existing target are
+//! carried over to the replacement, and writing through a symlink replaces
+//! the link's destination rather than the link itself.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -11,6 +13,41 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+/// Follow a chain of symlinks to the path that should actually be replaced.
+///
+/// `rename` operates on the directory entry it is given, so renaming a temp
+/// file onto a symlink replaces the link with a regular file. Resolving the
+/// chain first keeps the link intact and updates its destination instead
+/// (issue #688). Relative targets are resolved against the link's directory.
+fn resolve_write_target(target: &Path) -> std::io::Result<PathBuf> {
+    const MAX_SYMLINK_DEPTH: usize = 40;
+
+    let mut current = target.to_path_buf();
+    for _ in 0..MAX_SYMLINK_DEPTH {
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let link = std::fs::read_link(&current)?;
+                current = if link.is_absolute() {
+                    link
+                } else {
+                    current
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(link)
+                };
+            }
+            // Regular file, missing target (dangling link), or any other
+            // file type: this is the entry to write.
+            _ => return Ok(current),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "too many levels of symbolic links",
+    ))
+}
+
 /// Write `contents` to `target` atomically (temp file + fsync + rename).
 ///
 /// Preserves the permissions of an existing `target`; a new file keeps the
@@ -18,6 +55,8 @@ use std::os::unix::fs::PermissionsExt;
 /// be prepared (e.g. `/proc`-like pseudo filesystems) so behavior matches
 /// `std::fs::write` on filesystems where atomic replace is unavailable.
 pub fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let resolved = resolve_write_target(target)?;
+    let target = resolved.as_path();
     let tmp = match temp_path(target) {
         Some(p) => p,
         // No usable sibling directory (e.g. bare filename resolved against
@@ -70,6 +109,8 @@ pub fn atomic_write_splice(
     middle: &[u8],
     after: u64,
 ) -> std::io::Result<()> {
+    let resolved = resolve_write_target(target)?;
+    let target = resolved.as_path();
     let tmp = match temp_path(target) {
         Some(p) => p,
         None => return std::fs::write(target, middle),
@@ -168,6 +209,11 @@ struct TargetMetadata {
     mode: u32,
     uid: u32,
     gid: u32,
+    /// Extended attributes, which on Linux carry POSIX ACLs, security
+    /// labels and user metadata. Captured before the replacement and
+    /// re-applied afterwards (issue #691).
+    #[cfg(target_os = "linux")]
+    xattrs: Vec<(std::ffi::CString, Vec<u8>)>,
 }
 
 #[cfg(not(unix))]
@@ -180,12 +226,68 @@ fn existing_metadata(path: &Path) -> Option<TargetMetadata> {
         mode: m.permissions().mode(),
         uid: m.uid(),
         gid: m.gid(),
+        #[cfg(target_os = "linux")]
+        xattrs: existing_xattrs(path),
     })
 }
 
 #[cfg(not(unix))]
 fn existing_metadata(_path: &Path) -> Option<TargetMetadata> {
     None
+}
+
+/// Read every extended attribute of `path`. Best-effort: filesystems that do
+/// not support xattrs (or individual attributes that cannot be read) simply
+/// yield fewer entries.
+#[cfg(target_os = "linux")]
+fn existing_xattrs(path: &Path) -> Vec<(std::ffi::CString, Vec<u8>)> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::ptr;
+
+    let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return Vec::new();
+    };
+    // SAFETY: cpath is a valid NUL-terminated path; a null buffer with size 0
+    // asks the kernel for the required list length only.
+    let len = unsafe { libc::listxattr(cpath.as_ptr(), ptr::null_mut(), 0) };
+    if len <= 0 {
+        return Vec::new();
+    }
+    let mut names = vec![0u8; len as usize];
+    // SAFETY: names is writable for exactly `len` bytes.
+    let len = unsafe { libc::listxattr(cpath.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if len <= 0 {
+        return Vec::new();
+    }
+    names.truncate(len as usize);
+
+    let mut attrs = Vec::new();
+    for name in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
+        let Ok(cname) = std::ffi::CString::new(name) else {
+            continue;
+        };
+        // SAFETY: cname/cpath are valid NUL-terminated strings; a null value
+        // buffer with size 0 asks for the attribute length only.
+        let vlen = unsafe { libc::getxattr(cpath.as_ptr(), cname.as_ptr(), ptr::null_mut(), 0) };
+        if vlen < 0 {
+            continue;
+        }
+        let mut value = vec![0u8; vlen as usize];
+        // SAFETY: value is writable for exactly `vlen` bytes.
+        let got = unsafe {
+            libc::getxattr(
+                cpath.as_ptr(),
+                cname.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        };
+        if got >= 0 {
+            value.truncate(got as usize);
+            attrs.push((cname, value));
+        }
+    }
+    attrs
 }
 
 /// Apply captured metadata to the still-open temp file. Best-effort on
@@ -201,8 +303,30 @@ fn apply_metadata(file: &mut std::fs::File, meta: &TargetMetadata) -> std::io::R
     // only mutates its owner/group metadata and (uid, gid) are u32 values
     // with no pointer arguments.
     let _ = unsafe { libc::fchown(fd, meta.uid, meta.gid) };
-    file.set_permissions(std::fs::Permissions::from_mode(meta.mode))
+    file.set_permissions(std::fs::Permissions::from_mode(meta.mode))?;
+    apply_xattrs(file, meta);
+    Ok(())
 }
+
+/// Re-apply captured extended attributes to the replacement file. Best-effort
+/// for the same reason as `fchown`: some attributes (e.g. `security.*`) need
+/// privileges the process may not have, and a failed copy must not abort a
+/// content write. POSIX ACLs live in `system.posix_acl_*`, so they are
+/// restored by this pass (issue #691).
+#[cfg(target_os = "linux")]
+fn apply_xattrs(file: &std::fs::File, meta: &TargetMetadata) {
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    for (name, value) in &meta.xattrs {
+        // SAFETY: fd is a valid open file descriptor owned by `file`; name is
+        // NUL-terminated and value points to `value.len()` readable bytes.
+        let _ =
+            unsafe { libc::fsetxattr(fd, name.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_xattrs(_file: &std::fs::File, _meta: &TargetMetadata) {}
 
 #[cfg(not(unix))]
 fn apply_metadata(_file: &mut std::fs::File, _meta: &TargetMetadata) -> std::io::Result<()> {
@@ -301,5 +425,125 @@ mod tests {
         fs::write(&target, "a\r\nb\r\nc\r\nd\r\n").unwrap();
         atomic_write_splice(&target, 3, b"B\r\nX", 5).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"a\r\nB\r\nX\nc\r\nd\r\n");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn write_through_symlink_preserves_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.conf");
+        let link = dir.path().join("link.conf");
+        fs::write(&real, "old").unwrap();
+        std::os::unix::fs::symlink("real.conf", &link).unwrap();
+
+        atomic_write(&link, b"new").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink must not be replaced by a regular file"
+        );
+        assert_eq!(fs::read_link(&link).unwrap(), Path::new("real.conf"));
+        assert_eq!(fs::read(&real).unwrap(), b"new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn splice_through_symlink_preserves_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&real, "a\nb\nc\n").unwrap();
+        std::os::unix::fs::symlink("real.txt", &link).unwrap();
+
+        // Replace "b" with "B" through the link.
+        atomic_write_splice(&link, 2, b"B", 3).unwrap();
+
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&real).unwrap(), b"a\nB\nc\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn preserves_user_extended_attributes() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("attrs.conf");
+        fs::write(&target, "old").unwrap();
+
+        let cpath = CString::new(target.as_os_str().as_bytes()).unwrap();
+        let cname = CString::new("user.aish_test").unwrap();
+        let value = b"keep-me";
+        let rc = unsafe {
+            libc::setxattr(
+                cpath.as_ptr(),
+                cname.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        if rc != 0 {
+            eprintln!("skipping: filesystem does not support user xattrs");
+            return;
+        }
+
+        atomic_write(&target, b"new").unwrap();
+
+        let mut buf = [0u8; 32];
+        let n = unsafe {
+            libc::getxattr(
+                cpath.as_ptr(),
+                cname.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        assert_eq!(n, value.len() as isize, "extended attribute was lost");
+        assert_eq!(&buf[..n as usize], value);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn preserves_posix_acl_when_tools_available() {
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("acl.conf");
+        fs::write(&target, "old").unwrap();
+        let path = target.to_str().unwrap();
+
+        let Ok(out) = Command::new("setfacl")
+            .args(["-m", "u:65534:r", path])
+            .output()
+        else {
+            eprintln!("skipping: setfacl not installed");
+            return;
+        };
+        if !out.status.success() {
+            eprintln!(
+                "skipping: setfacl failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+
+        atomic_write(&target, b"new").unwrap();
+
+        let Ok(out) = Command::new("getfacl").args(["-c", "-p", path]).output() else {
+            eprintln!("skipping: getfacl not installed");
+            return;
+        };
+        let acl = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            acl.contains("user:65534:r--") || acl.contains("user:nobody:r--"),
+            "POSIX ACL was not preserved, getfacl output:\n{acl}"
+        );
     }
 }

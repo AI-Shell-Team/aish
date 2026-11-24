@@ -1590,6 +1590,7 @@ tools:
       old_string_not_found_prefix_hint: "在 {path} 中未找到 'old_string'，但其前缀 '{prefix}' 出现了 {count} 次 — 可能是后缀不匹配"
       old_string_ambiguous: "'old_string' 在 {path} 中出现了 {count} 次 - 使用 replace_all=true 或提供更多上下文"
       edit_success: "已编辑 {path}"
+      symlink_target: "（符号链接目标：{target}）"
       edit_write_failed: "写入 {path} 失败: {error}"
       invalid_tag: "{path} 的快照标签 '{tag}' 无效"
       not_undoable_confirm: "编辑 {path}：无法为原内容建立快照，此修改不可撤销（/undo 无法恢复）。是否继续？"
