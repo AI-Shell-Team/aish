@@ -68,7 +68,7 @@ pub fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
 
     // Snapshot target metadata before touching anything so the renamed
     // replacement keeps the original mode bits, owner and group.
-    let prior_meta = existing_metadata(target);
+    let prior_meta = existing_metadata(target)?;
 
     let write_result = (|| -> std::io::Result<()> {
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
@@ -117,7 +117,7 @@ pub fn atomic_write_splice(
         Some(p) => p,
         None => return std::fs::write(target, middle),
     };
-    let prior_meta = existing_metadata(target);
+    let prior_meta = existing_metadata(target)?;
 
     let write_result = (|| -> std::io::Result<()> {
         use std::io::{Seek, SeekFrom};
@@ -222,49 +222,96 @@ struct TargetMetadata {
 struct TargetMetadata;
 
 #[cfg(unix)]
-fn existing_metadata(path: &Path) -> Option<TargetMetadata> {
+fn existing_metadata(path: &Path) -> std::io::Result<Option<TargetMetadata>> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|m| TargetMetadata {
-        mode: m.permissions().mode(),
-        uid: m.uid(),
-        gid: m.gid(),
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(None);
+    };
+    Ok(Some(TargetMetadata {
+        mode: meta.permissions().mode(),
+        uid: meta.uid(),
+        gid: meta.gid(),
         #[cfg(target_os = "linux")]
-        xattrs: existing_xattrs(path),
-    })
+        xattrs: existing_xattrs(path)?,
+    }))
 }
 
 #[cfg(not(unix))]
-fn existing_metadata(_path: &Path) -> Option<TargetMetadata> {
-    None
+fn existing_metadata(_path: &Path) -> std::io::Result<Option<TargetMetadata>> {
+    Ok(None)
 }
 
-/// Read every extended attribute of `path`. Best-effort: filesystems that do
-/// not support xattrs (or individual attributes that cannot be read) simply
-/// yield fewer entries.
+/// Extended attribute name carrying the POSIX access ACL.
 #[cfg(target_os = "linux")]
-fn existing_xattrs(path: &Path) -> Vec<(std::ffi::CString, Vec<u8>)> {
+const ACL_ACCESS_XATTR: &[u8] = b"system.posix_acl_access";
+
+/// Collect the attributes that should survive an atomic replacement.
+///
+/// The access ACL is captured separately and first: a race in the bulk
+/// `listxattr` enumeration (for example, `ERANGE` after another process adds
+/// an attribute) must never be mistaken for "there is no ACL". Confirmed
+/// absence (`ENODATA`) and filesystems without xattr support (`ENOTSUP`) are
+/// fine; any other capture failure aborts the write while the original file
+/// is still intact (issue #691).
+#[cfg(target_os = "linux")]
+fn existing_xattrs(path: &Path) -> std::io::Result<Vec<(std::ffi::CString, Vec<u8>)>> {
     use std::os::unix::ffi::OsStrExt;
     use std::ptr;
 
     let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    // SAFETY: cpath is a valid NUL-terminated path; a null buffer with size 0
-    // asks the kernel for the required list length only.
-    let len = unsafe { libc::listxattr(cpath.as_ptr(), ptr::null_mut(), 0) };
-    if len <= 0 {
-        return Vec::new();
-    }
-    let mut names = vec![0u8; len as usize];
-    // SAFETY: names is writable for exactly `len` bytes.
-    let len = unsafe { libc::listxattr(cpath.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
-    if len <= 0 {
-        return Vec::new();
-    }
-    names.truncate(len as usize);
-
     let mut attrs = Vec::new();
+
+    // Capture the access ACL independently of best-effort enumeration.
+    let acl_name = std::ffi::CString::new(ACL_ACCESS_XATTR).expect("static ACL name");
+    match get_xattr(&cpath, &acl_name) {
+        Ok(Some(value)) => attrs.push((acl_name, value)),
+        // ENODATA / ENOTSUP are mapped to Ok(None): confirmed absence, or a
+        // filesystem that cannot store ACLs.
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
+
+    // Enumerate the remaining attributes. `listxattr` can race with another
+    // process adding an attribute and return ERANGE for the second call;
+    // retry instead of treating that as "no attributes".
+    let mut names = Vec::new();
+    for attempt in 0..4 {
+        let len = unsafe { libc::listxattr(cpath.as_ptr(), ptr::null_mut(), 0) };
+        if len < 0 {
+            let err = std::io::Error::last_os_error();
+            if is_xattr_unsupported(&err) {
+                return Ok(attrs);
+            }
+            return Err(err);
+        }
+        if len == 0 {
+            names.clear();
+            break;
+        }
+        let mut buf = vec![0u8; len as usize];
+        let got = unsafe { libc::listxattr(cpath.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        if got >= 0 {
+            buf.truncate(got as usize);
+            names = buf;
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        if is_xattr_unsupported(&err) {
+            return Ok(attrs);
+        }
+        if err.raw_os_error() != Some(libc::ERANGE) || attempt == 3 {
+            return Err(err);
+        }
+    }
+
     for name in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
+        if name == ACL_ACCESS_XATTR {
+            // Already captured above; a concurrent change here is not a
+            // reason to duplicate or drop the required ACL entry.
+            continue;
+        }
         // Linux clears file capabilities when a file's content is written
         // (file_remove_privs), so copying an old capability onto changed
         // content would either be silently dropped or, worse, grant the new
@@ -275,28 +322,63 @@ fn existing_xattrs(path: &Path) -> Vec<(std::ffi::CString, Vec<u8>)> {
         let Ok(cname) = std::ffi::CString::new(name) else {
             continue;
         };
-        // SAFETY: cname/cpath are valid NUL-terminated strings; a null value
-        // buffer with size 0 asks for the attribute length only.
-        let vlen = unsafe { libc::getxattr(cpath.as_ptr(), cname.as_ptr(), ptr::null_mut(), 0) };
-        if vlen < 0 {
-            continue;
-        }
-        let mut value = vec![0u8; vlen as usize];
-        // SAFETY: value is writable for exactly `vlen` bytes.
-        let got = unsafe {
-            libc::getxattr(
-                cpath.as_ptr(),
-                cname.as_ptr(),
-                value.as_mut_ptr().cast(),
-                value.len(),
-            )
-        };
-        if got >= 0 {
-            value.truncate(got as usize);
+        // The attribute disappeared between listxattr and getxattr, or
+        // cannot be read: non-ACL attributes stay best-effort.
+        if let Ok(Some(value)) = get_xattr(&cpath, &cname) {
             attrs.push((cname, value));
         }
     }
-    attrs
+
+    Ok(attrs)
+}
+
+/// Read one named xattr.
+///
+/// Returns `Ok(None)` for confirmed absence (`ENODATA`) or a filesystem
+/// without xattr support (`ENOTSUP`); other errors are propagated.
+#[cfg(target_os = "linux")]
+fn get_xattr(path: &std::ffi::CStr, name: &std::ffi::CStr) -> std::io::Result<Option<Vec<u8>>> {
+    use std::ptr;
+
+    let len = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), ptr::null_mut(), 0) };
+    if len < 0 {
+        let err = std::io::Error::last_os_error();
+        return if is_xattr_missing(&err) {
+            Ok(None)
+        } else {
+            Err(err)
+        };
+    }
+    let mut value = vec![0u8; len as usize];
+    if len == 0 {
+        return Ok(Some(value));
+    }
+    let got = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if got < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    value.truncate(got as usize);
+    Ok(Some(value))
+}
+
+#[cfg(target_os = "linux")]
+fn is_xattr_missing(err: &std::io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::ENODATA) | Some(libc::ENOTSUP)
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn is_xattr_unsupported(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(libc::ENOTSUP)
 }
 
 /// Apply captured metadata to the still-open temp file. Best-effort on
@@ -609,6 +691,40 @@ mod tests {
             })
             .is_ok(),
             "non-ACL attributes must remain best-effort"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn get_xattr_distinguishes_absence_from_value() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("xattr.conf");
+        fs::write(&target, "x").unwrap();
+        let cpath = CString::new(target.as_os_str().as_bytes()).unwrap();
+
+        let missing = CString::new("user.aish_missing").unwrap();
+        assert!(get_xattr(&cpath, &missing).unwrap().is_none());
+
+        let name = CString::new("user.aish_present").unwrap();
+        let value = b"hello";
+        let rc = unsafe {
+            libc::setxattr(
+                cpath.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        if rc != 0 {
+            eprintln!("skipping: filesystem does not support user xattrs");
+            return;
+        }
+        assert_eq!(
+            get_xattr(&cpath, &name).unwrap().as_deref(),
+            Some(&value[..])
         );
     }
 }
