@@ -79,6 +79,31 @@ pub mod fs {
     pub use crate::read_file::{ReadFileTool, SshReadFileTool};
     pub use crate::undo_edit::UndoEditTool;
     pub use crate::write_file::WriteFileTool;
+
+    /// Helpers shared by filesystem tool tests.
+    #[cfg(all(test, unix))]
+    pub(crate) mod test_support {
+        use std::path::Path;
+        use std::process::Command;
+
+        /// Run `cat <path>` as `uid`. Returns `None` when the test process is
+        /// not privileged enough to switch uids, so callers can skip the
+        /// check instead of failing in an unprivileged CI environment.
+        pub(crate) fn readable_as_uid(path: &Path, uid: u32) -> Option<bool> {
+            // SAFETY: geteuid takes no arguments and has no side effects.
+            if unsafe { libc::geteuid() } != 0 {
+                return None;
+            }
+            use std::os::unix::process::CommandExt;
+            let out = Command::new("cat")
+                .arg(path)
+                .uid(uid)
+                .gid(uid)
+                .output()
+                .ok()?;
+            Some(out.status.success())
+        }
+    }
 }
 
 pub mod glob_tool {

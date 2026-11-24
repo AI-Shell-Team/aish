@@ -139,6 +139,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
 
+      - name: Install ACL tools for xattr regression tests
+        run: sudo apt-get update && sudo apt-get install -y acl
+
       - name: Run tests
         run: cargo test --workspace
 
