@@ -482,4 +482,47 @@ mod tests {
             PreflightResult::Allow
         ));
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_write_file_preserves_posix_acl_when_tools_available() {
+        use std::process::Command;
+
+        aish_i18n::set_locale("en-US");
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_path = dir.path().join("acl.conf");
+        fs::write(&file_path, "port=8080\n").unwrap();
+        let path = file_path.to_str().unwrap();
+
+        let Ok(out) = Command::new("setfacl")
+            .args(["-m", "u:65534:r", path])
+            .output()
+        else {
+            eprintln!("skipping: setfacl not installed");
+            return;
+        };
+        if !out.status.success() {
+            eprintln!(
+                "skipping: setfacl failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+
+        let tool = WriteFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": path,
+            "content": "port=9090\n"
+        }));
+        assert!(result.ok, "write failed: {}", result.output);
+
+        let Ok(out) = Command::new("getfacl").args(["-c", "-p", path]).output() else {
+            eprintln!("skipping: getfacl not installed");
+            return;
+        };
+        let acl = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            acl.contains("user:65534:r--") || acl.contains("user:nobody:r--"),
+            "write_file did not preserve the access ACL:\n{acl}"
+        );
+    }
 }

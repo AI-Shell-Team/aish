@@ -3,7 +3,9 @@
 //! the new one intact — never a truncated target. Permissions, owner, group
 //! and extended attributes (including POSIX ACLs) of an existing target are
 //! carried over to the replacement, and writing through a symlink replaces
-//! the link's destination rather than the link itself.
+//! the link's destination rather than the link itself. File capabilities
+//! (`security.capability`) are intentionally not carried over: changing the
+//! content clears them, matching in-place edit semantics.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -263,6 +265,13 @@ fn existing_xattrs(path: &Path) -> Vec<(std::ffi::CString, Vec<u8>)> {
 
     let mut attrs = Vec::new();
     for name in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
+        // Linux clears file capabilities when a file's content is written
+        // (file_remove_privs), so copying an old capability onto changed
+        // content would either be silently dropped or, worse, grant the new
+        // content privileges the old one had. Keep in-place edit semantics.
+        if name == b"security.capability" {
+            continue;
+        }
         let Ok(cname) = std::ffi::CString::new(name) else {
             continue;
         };
@@ -304,7 +313,7 @@ fn apply_metadata(file: &mut std::fs::File, meta: &TargetMetadata) -> std::io::R
     // with no pointer arguments.
     let _ = unsafe { libc::fchown(fd, meta.uid, meta.gid) };
     file.set_permissions(std::fs::Permissions::from_mode(meta.mode))?;
-    apply_xattrs(file, meta);
+    apply_xattrs(file, meta)?;
     Ok(())
 }
 
@@ -314,19 +323,48 @@ fn apply_metadata(file: &mut std::fs::File, meta: &TargetMetadata) -> std::io::R
 /// content write. POSIX ACLs live in `system.posix_acl_*`, so they are
 /// restored by this pass (issue #691).
 #[cfg(target_os = "linux")]
-fn apply_xattrs(file: &std::fs::File, meta: &TargetMetadata) {
+fn apply_xattrs(file: &std::fs::File, meta: &TargetMetadata) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
     let fd = file.as_raw_fd();
-    for (name, value) in &meta.xattrs {
+    apply_xattr_list(&meta.xattrs, |name, value| {
         // SAFETY: fd is a valid open file descriptor owned by `file`; name is
         // NUL-terminated and value points to `value.len()` readable bytes.
-        let _ =
+        let rc =
             unsafe { libc::fsetxattr(fd, name.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    })
+}
+
+/// Apply captured attributes through `set_value`.
+///
+/// Losing `system.posix_acl_access` changes who may access the file, so a
+/// failure to restore it is fatal and must abort the write before the
+/// original is replaced (issue #691). Every other attribute stays
+/// best-effort: e.g. `security.*` may require privileges the caller lacks.
+#[cfg(target_os = "linux")]
+fn apply_xattr_list(
+    attrs: &[(std::ffi::CString, Vec<u8>)],
+    mut set_value: impl FnMut(&std::ffi::CString, &[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    for (name, value) in attrs {
+        let required = name.as_bytes() == b"system.posix_acl_access";
+        match set_value(name, value) {
+            Ok(()) => {}
+            Err(e) if required => return Err(e),
+            Err(_) => {}
+        }
     }
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn apply_xattrs(_file: &std::fs::File, _meta: &TargetMetadata) {}
+fn apply_xattrs(_file: &std::fs::File, _meta: &TargetMetadata) -> std::io::Result<()> {
+    Ok(())
+}
 
 #[cfg(not(unix))]
 fn apply_metadata(_file: &mut std::fs::File, _meta: &TargetMetadata) -> std::io::Result<()> {
@@ -544,6 +582,33 @@ mod tests {
         assert!(
             acl.contains("user:65534:r--") || acl.contains("user:nobody:r--"),
             "POSIX ACL was not preserved, getfacl output:\n{acl}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acl_failure_aborts_but_other_xattr_failures_are_best_effort() {
+        use std::ffi::CString;
+
+        let acl = CString::new("system.posix_acl_access").unwrap();
+        let user = CString::new("user.aish_test").unwrap();
+
+        let attrs = vec![(user, b"v".to_vec()), (acl, b"a".to_vec())];
+        let err = apply_xattr_list(&attrs, |_, _| {
+            Err(std::io::Error::other("simulated fsetxattr failure"))
+        });
+        assert!(
+            err.is_err(),
+            "failure to restore the access ACL must abort the write"
+        );
+
+        let attrs = vec![(CString::new("user.aish_test").unwrap(), b"v".to_vec())];
+        assert!(
+            apply_xattr_list(&attrs, |_, _| {
+                Err(std::io::Error::other("simulated fsetxattr failure"))
+            })
+            .is_ok(),
+            "non-ACL attributes must remain best-effort"
         );
     }
 }
