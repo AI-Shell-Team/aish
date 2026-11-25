@@ -101,34 +101,77 @@ pub fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// Result of a successful splice.
+#[derive(Debug)]
+pub struct SpliceOutput {
+    /// Tag of the complete new file.
+    pub new_tag: SnapshotTag,
+    /// Complete source file as observed while building the replacement, when
+    /// the caller asked to capture it for rollback.
+    pub prior: Option<Vec<u8>>,
+}
+
+/// Errors from [`atomic_write_splice`].
+#[derive(Debug)]
+pub enum SpliceError {
+    /// The target changed between the caller's scan and the splice read.
+    SourceChanged,
+    /// Underlying I/O error.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for SpliceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpliceError::SourceChanged => f.write_str("source changed during edit"),
+            SpliceError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SpliceError {}
+
+impl From<std::io::Error> for SpliceError {
+    fn from(e: std::io::Error) -> Self {
+        SpliceError::Io(e)
+    }
+}
+
 /// Atomically replace `target` with: original bytes `[0, before)` +
 /// `middle` + original bytes `[after, len)`. Streamed variant of
 /// [`atomic_write`] for line-range edits on very large files. The untouched
 /// head and tail are copied straight from the source file, so only
-/// `middle` is ever materialized. Metadata carry-over, fsync and the
-/// atomic rename match [`atomic_write`].
+/// `middle` is ever materialized.
 ///
-/// Returns the snapshot tag of the exact bytes written. The splice streams
-/// the output anyway, so hashing it here avoids a second full read just to
-/// refresh the session's file anchor (issues #692, #696).
+/// While copying, the same source bytes are hashed into `source_tag` and,
+/// when `capture_prior` is set, captured as the complete prior content. The
+/// hash is checked against `expected_source` before the rename, so a file
+/// that changed between the caller's validation scan and this splice is
+/// rejected before publishing the replacement.
+///
+/// `original_window` is the source bytes in `[before, after)` (the bytes the
+/// caller replaced with `middle`). It is needed to reconstruct the complete
+/// source snapshot without a second read of the quieted range.
 pub fn atomic_write_splice(
     target: &Path,
     before: u64,
+    original_window: &[u8],
     middle: &[u8],
     after: u64,
-) -> std::io::Result<SnapshotTag> {
+    expected_source: Option<SnapshotTag>,
+    capture_prior: bool,
+) -> Result<SpliceOutput, SpliceError> {
     let resolved = resolve_write_target(target)?;
     let target = resolved.as_path();
-    let tmp = match temp_path(target) {
-        Some(p) => p,
-        None => {
-            std::fs::write(target, middle)?;
-            return Ok(SnapshotTag::from_bytes(middle));
-        }
+    let Some(tmp) = temp_path(target) else {
+        return Err(SpliceError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cannot create a sibling temp file for this target",
+        )));
     };
     let prior_meta = existing_metadata(target)?;
 
-    let write_result = (|| -> std::io::Result<SnapshotTag> {
+    let write_result = (|| -> Result<SpliceOutput, SpliceError> {
         use std::io::{Seek, SeekFrom};
         let mut src = std::fs::File::open(target)?;
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
@@ -136,39 +179,72 @@ pub fn atomic_write_splice(
             apply_metadata(&mut file, meta)?;
         }
 
-        let mut hasher = StreamingTagHasher::new();
-        copy_exactly(&mut src, &mut file, before, &mut hasher)?;
+        let mut new_hasher = StreamingTagHasher::new();
+        let mut source_hasher = StreamingTagHasher::new();
+        let mut prior = capture_prior.then(Vec::new);
+
+        copy_exactly(
+            &mut src,
+            &mut file,
+            before,
+            &mut new_hasher,
+            &mut source_hasher,
+            &mut prior,
+        )?;
+        // The replaced range is part of the source snapshot even though it is
+        // not part of the output.
+        source_hasher.update(original_window);
+        if let Some(prior) = prior.as_mut() {
+            prior.extend_from_slice(original_window);
+        }
         file.write_all(middle)?;
-        hasher.update(middle);
+        new_hasher.update(middle);
         src.seek(SeekFrom::Start(after))?;
-        copy_remaining(&mut src, &mut file, &mut hasher)?;
+        copy_remaining(
+            &mut src,
+            &mut file,
+            &mut new_hasher,
+            &mut source_hasher,
+            &mut prior,
+        )?;
+
+        if let Some(expected) = expected_source {
+            if source_hasher.finalize() != expected {
+                return Err(SpliceError::SourceChanged);
+            }
+        }
 
         file.sync_all()?;
         drop(file);
         std::fs::rename(&tmp, target)?;
-        if let Some(dir) = temp_dir_for(target) {
-            let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
-        }
-        Ok(hasher.finalize())
+        sync_parent_dir(target);
+        Ok(SpliceOutput {
+            new_tag: new_hasher.finalize(),
+            prior,
+        })
     })();
 
     match write_result {
-        Ok(tag) => Ok(tag),
-        Err(e) => {
+        Ok(out) => Ok(out),
+        Err(err) => {
+            // Never leave the temp file behind; the target is untouched when
+            // the source check or a write step failed.
             let _ = std::fs::remove_file(&tmp);
-            Err(e)
+            Err(err)
         }
     }
 }
 
 /// Copy exactly `count` bytes from `src` to `dst` in bounded chunks so the
-/// untouched regions of a huge file never sit in memory. The same bytes are
-/// fed to the tag hasher, so no second pass is needed.
+/// untouched regions of a huge file never sit in memory. The same bytes feed
+/// both the output hash and the source snapshot (hash plus optional capture).
 fn copy_exactly(
     src: &mut std::fs::File,
     dst: &mut std::fs::File,
     count: u64,
-    hasher: &mut StreamingTagHasher,
+    new_hasher: &mut StreamingTagHasher,
+    source_hasher: &mut StreamingTagHasher,
+    prior: &mut Option<Vec<u8>>,
 ) -> std::io::Result<()> {
     use std::io::Read;
     let mut remaining = count;
@@ -177,199 +253,38 @@ fn copy_exactly(
         let want = std::cmp::min(remaining, chunk.len() as u64) as usize;
         src.read_exact(&mut chunk[..want])?;
         dst.write_all(&chunk[..want])?;
-        hasher.update(&chunk[..want]);
+        new_hasher.update(&chunk[..want]);
+        source_hasher.update(&chunk[..want]);
+        if let Some(prior) = prior.as_mut() {
+            prior.extend_from_slice(&chunk[..want]);
+        }
         remaining -= want as u64;
     }
     Ok(())
 }
 
-/// Copy `src` to EOF in bounded chunks, hashing every byte written.
+/// Copy `src` to EOF in bounded chunks, feeding the output hash, source hash
+/// and optional prior capture.
 fn copy_remaining(
     src: &mut std::fs::File,
     dst: &mut std::fs::File,
-    hasher: &mut StreamingTagHasher,
-) -> std::io::Result<u64> {
+    new_hasher: &mut StreamingTagHasher,
+    source_hasher: &mut StreamingTagHasher,
+    prior: &mut Option<Vec<u8>>,
+) -> std::io::Result<()> {
     use std::io::Read;
     let mut chunk = [0u8; 64 * 1024];
-    let mut total = 0u64;
     loop {
         let n = src.read(&mut chunk)?;
         if n == 0 {
-            return Ok(total);
+            return Ok(());
         }
         dst.write_all(&chunk[..n])?;
-        hasher.update(&chunk[..n]);
-        total += n as u64;
-    }
-}
-
-/// Outcome of a conditional replace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConditionalWriteOutcome {
-    /// The target matched `expected` at commit time and was replaced.
-    Written,
-    /// The target no longer matched `expected`; it was left untouched.
-    Conflict,
-}
-
-/// Atomically replace `target` with `contents`, but only if the target still
-/// contains `expected` at commit time.
-///
-/// On Linux this uses `renameat2(RENAME_EXCHANGE)`: the new content is written
-/// to a sibling temp file, then the two paths are swapped atomically. The
-/// swapped-out entry (the target as it existed at the instant of the swap) is
-/// compared with `expected`. On match the old entry is removed; on mismatch
-/// the swap is reverted, preserving the external change and returning
-/// [`ConditionalWriteOutcome::Conflict`].
-///
-/// This is a commit-time conditional replace, so it does not rely on a
-/// read-then-rename window. On filesystems/targets where `RENAME_EXCHANGE` is
-/// unavailable, it falls back to a best-effort read-compare-write.
-pub fn atomic_write_if_unchanged(
-    target: &Path,
-    expected: &[u8],
-    contents: &[u8],
-) -> std::io::Result<ConditionalWriteOutcome> {
-    #[cfg(target_os = "linux")]
-    {
-        atomic_write_if_unchanged_linux(target, expected, contents)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        atomic_write_if_unchanged_fallback(target, expected, contents)
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn atomic_write_if_unchanged_linux(
-    target: &Path,
-    expected: &[u8],
-    contents: &[u8],
-) -> std::io::Result<ConditionalWriteOutcome> {
-    let resolved = resolve_write_target(target)?;
-    let target = resolved.as_path();
-    let tmp = match temp_path(target) {
-        Some(p) => p,
-        None => return atomic_write_if_unchanged_fallback(target, expected, contents),
-    };
-    let prior_meta = existing_metadata(target)?;
-
-    let write_result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        if let Some(meta) = &prior_meta {
-            apply_metadata(&mut file, meta)?;
+        new_hasher.update(&chunk[..n]);
+        source_hasher.update(&chunk[..n]);
+        if let Some(prior) = prior.as_mut() {
+            prior.extend_from_slice(&chunk[..n]);
         }
-        file.write_all(contents)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-
-    if let Err(e) = rename_exchange(&tmp, target) {
-        let _ = std::fs::remove_file(&tmp);
-        // The filesystem may not implement RENAME_EXCHANGE. Fall back to a
-        // best-effort conditional write rather than failing the edit.
-        if matches!(
-            e.raw_os_error(),
-            Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
-        ) {
-            return atomic_write_if_unchanged_fallback(target, expected, contents);
-        }
-        return Err(e);
-    }
-
-    // The swap put the previous target at `tmp`. Compare exactly the bytes
-    // that were at the target when the exchange committed.
-    let matched = match std::fs::metadata(&tmp) {
-        Ok(meta) if meta.len() == expected.len() as u64 => std::fs::read(&tmp)
-            .map(|old| old == expected)
-            .unwrap_or(false),
-        _ => false,
-    };
-
-    if matched {
-        // Our contents are now at `target`; discard the old entry.
-        let _ = std::fs::remove_file(&tmp);
-        sync_parent_dir(target);
-        return Ok(ConditionalWriteOutcome::Written);
-    }
-
-    // Conflict: put the external content back at `target` and discard our
-    // replacement from the temp path. First make sure no writer touched the
-    // target after our exchange; swapping back over such a write would lose
-    // it. If they did, keep their latest content and leave the pre-exchange
-    // snapshot at `tmp` for recovery.
-    let target_still_ours = std::fs::read(target)
-        .map(|current| current == contents)
-        .unwrap_or(false);
-    if !target_still_ours {
-        sync_parent_dir(target);
-        return Ok(ConditionalWriteOutcome::Conflict);
-    }
-
-    match rename_exchange(&tmp, target) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&tmp);
-            sync_parent_dir(target);
-            Ok(ConditionalWriteOutcome::Conflict)
-        }
-        Err(e) => {
-            // Leave `tmp` in place: it still holds the external content.
-            Err(e)
-        }
-    }
-}
-
-fn atomic_write_if_unchanged_fallback(
-    target: &Path,
-    expected: &[u8],
-    contents: &[u8],
-) -> std::io::Result<ConditionalWriteOutcome> {
-    let resolved = resolve_write_target(target)?;
-    let target = resolved.as_path();
-    match std::fs::read(target) {
-        Ok(current) if current == expected => {
-            atomic_write(target, contents)?;
-            Ok(ConditionalWriteOutcome::Written)
-        }
-        Ok(_) => Ok(ConditionalWriteOutcome::Conflict),
-        Err(e) => Err(e),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn rename_exchange(left: &Path, right: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let left = CString::new(left.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
-    let right = CString::new(right.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
-
-    // Use the raw syscall rather than libc::renameat2: the musl static build
-    // does not export a renameat2 wrapper, so calling the symbol directly
-    // fails to link in the release artifact.
-    //
-    // SAFETY: both pointers are valid NUL-terminated strings that outlive the
-    // call; SYS_renameat2 has no other preconditions.
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            left.as_ptr(),
-            libc::AT_FDCWD,
-            right.as_ptr(),
-            libc::RENAME_EXCHANGE,
-        )
-    };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -758,7 +673,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("f.txt");
         fs::write(&target, "a\r\nb\r\nc\r\nd\r\n").unwrap();
-        atomic_write_splice(&target, 3, b"B\r\nX", 5).unwrap();
+        atomic_write_splice(&target, 3, b"b\r", b"B\r\nX", 5, None, false).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"a\r\nB\r\nX\nc\r\nd\r\n");
     }
     #[cfg(unix)]
@@ -793,7 +708,7 @@ mod tests {
         std::os::unix::fs::symlink("real.txt", &link).unwrap();
 
         // Replace "b" with "B" through the link.
-        atomic_write_splice(&link, 2, b"B", 3).unwrap();
+        atomic_write_splice(&link, 2, b"b", b"B", 3, None, false).unwrap();
 
         assert!(fs::symlink_metadata(&link)
             .unwrap()
@@ -957,60 +872,57 @@ mod tests {
     }
 
     #[test]
-    fn splice_returns_tag_of_complete_output() {
+    fn splice_returns_complete_tags_and_prior() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("f.txt");
-        fs::write(&target, "alpha\nbeta\ngamma\n").unwrap();
+        let prior = "alpha\nbeta\ngamma\n";
+        fs::write(&target, prior).unwrap();
 
-        let tag = atomic_write_splice(&target, 6, b"BETA", 10).unwrap();
+        let out = atomic_write_splice(
+            &target,
+            6,
+            b"beta",
+            b"BETA",
+            10,
+            Some(SnapshotTag::from_content(prior)),
+            true,
+        )
+        .unwrap();
 
         let written = fs::read(&target).unwrap();
         assert_eq!(written, b"alpha\nBETA\ngamma\n");
         assert_eq!(
-            tag,
+            out.new_tag,
             SnapshotTag::from_bytes(&written),
             "the returned tag must describe the whole resulting file"
+        );
+        assert_eq!(
+            out.prior.as_deref(),
+            Some(prior.as_bytes()),
+            "the captured prior must be the complete source snapshot"
         );
     }
 
     #[test]
-    fn conditional_write_replaces_when_snapshot_matches() {
+    fn splice_rejects_changed_source_before_rename() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("f.txt");
-        fs::write(&target, "old").unwrap();
+        let original = "alpha\nbeta\ngamma\n";
+        fs::write(&target, original).unwrap();
 
-        let outcome = atomic_write_if_unchanged(&target, b"old", b"new").unwrap();
-        assert_eq!(outcome, ConditionalWriteOutcome::Written);
-        assert_eq!(fs::read(&target).unwrap(), b"new");
-    }
+        // Caller scanned a different version of the file.
+        let err = atomic_write_splice(
+            &target,
+            6,
+            b"beta",
+            b"BETA",
+            10,
+            Some(SnapshotTag::from_content("alpha\nDRIFTED\ngamma\n")),
+            true,
+        )
+        .unwrap_err();
 
-    #[test]
-    fn conditional_write_preserves_external_change_on_conflict() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("f.txt");
-        fs::write(&target, "external").unwrap();
-
-        // The caller's snapshot says "old", but the target already changed.
-        let outcome = atomic_write_if_unchanged(&target, b"old", b"new").unwrap();
-        assert_eq!(outcome, ConditionalWriteOutcome::Conflict);
-        assert_eq!(fs::read(&target).unwrap(), b"external");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn conditional_write_through_symlink_keeps_link() {
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("real.txt");
-        let link = dir.path().join("link.txt");
-        fs::write(&real, "old").unwrap();
-        std::os::unix::fs::symlink("real.txt", &link).unwrap();
-
-        let outcome = atomic_write_if_unchanged(&link, b"old", b"new").unwrap();
-        assert_eq!(outcome, ConditionalWriteOutcome::Written);
-        assert!(fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(fs::read(&real).unwrap(), b"new");
+        assert!(matches!(err, SpliceError::SourceChanged));
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
     }
 }
