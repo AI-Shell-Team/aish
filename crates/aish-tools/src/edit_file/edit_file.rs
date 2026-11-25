@@ -476,18 +476,91 @@ impl EditFileTool {
             return err;
         }
 
-        // Capture the full prior content for /undo when the file is small
-        // enough for the snapshot budget. Must happen before the splice
-        // write replaces the file on disk.
-        let prior_within_budget = file_len <= SNAPSHOT_MAX_BYTES as u64;
-        let prior_bytes: Option<Vec<u8>> = if self.store.is_some() && prior_within_budget {
-            read_window(Path::new(path), 0, file_len).ok()
-        } else {
-            None
-        };
-        let skip = prior_bytes.is_none();
+        // Rollback-capable edits must derive the prior bytes and the new
+        // file from ONE snapshot. Reading prior bytes and then letting
+        // atomic_write_splice re-read the source leaves a window where an
+        // external write can land between the two reads: the edit + new tag
+        // would include it, but undo would restore the older prior bytes and
+        // silently drop the external change. Capture the file once and write
+        // the complete replacement from that buffer instead (issue #692
+        // review). Large files are not undoable, so they keep the streaming
+        // splice path below.
+        if self.store.is_some() && file_len <= SNAPSHOT_MAX_BYTES as u64 {
+            let prior_bytes = match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("path".to_string(), path.to_string());
+                    args_map.insert("error".to_string(), e.to_string());
+                    return ToolResult::error(aish_i18n::t_with_args(
+                        "tools.fs.edit_file.edit_read_failed",
+                        &args_map,
+                    ));
+                }
+            };
+            if prior_bytes.len() as u64 != file_len
+                || SnapshotTag::from_bytes(&prior_bytes) != disk_tag
+            {
+                // The file changed between the validation scan and this
+                // snapshot read. Reject instead of recording two different
+                // source versions.
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.stale_tag",
+                    &args_map,
+                ));
+            }
 
-        // Pass 2: splice — untouched head and tail stream straight from the
+            let replaced_len = (window_end - window_start) as usize;
+            let mut new_full = Vec::with_capacity(
+                prior_bytes
+                    .len()
+                    .saturating_sub(replaced_len)
+                    .saturating_add(new_window.len()),
+            );
+            new_full.extend_from_slice(&prior_bytes[..window_start as usize]);
+            new_full.extend_from_slice(new_window.as_bytes());
+            new_full.extend_from_slice(&prior_bytes[window_end as usize..]);
+            let new_tag = SnapshotTag::from_bytes(&new_full);
+
+            return match atomic_write(Path::new(path), &new_full) {
+                Ok(()) => {
+                    if let Some(store) = &self.store {
+                        store
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .record_mutation_with_tag(
+                                Path::new(path),
+                                Some(prior_bytes),
+                                new_tag,
+                                SnapshotOp::Edit,
+                            );
+                    }
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("path".to_string(), path.to_string());
+                    ToolResult::success(format!(
+                        "{}{}\n[{}#{}]",
+                        aish_i18n::t_with_args("tools.fs.edit_file.edit_success", &args_map),
+                        Self::symlink_write_note(path),
+                        path,
+                        new_tag
+                    ))
+                }
+                Err(e) => {
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("path".to_string(), path.to_string());
+                    args_map.insert("error".to_string(), e.to_string());
+                    ToolResult::error(aish_i18n::t_with_args(
+                        "tools.fs.edit_file.edit_write_failed",
+                        &args_map,
+                    ))
+                }
+            };
+        }
+
+        // Pass 2: splice — used when no rollback snapshot is kept (large file
+        // or no store). Untouched head and tail stream straight from the
         // source file; only the replacement window is materialized.
         match atomic_write_splice(
             Path::new(path),
@@ -501,25 +574,16 @@ impl EditFileTool {
             // next edit and an immediate undo see phantom drift (#692).
             Ok(new_tag) => {
                 let tag_suffix = if let Some(store) = &self.store {
-                    let mut g = store.lock().unwrap_or_else(|e| e.into_inner());
-                    if skip {
-                        // Prior too large for rollback memory; refresh tag only.
-                        g.record_tag(Path::new(path), new_tag);
-                        format!(
-                            "\n[{}#{}]{}",
-                            path,
-                            new_tag,
-                            aish_i18n::t("tools.fs.edit_file.not_undoable_suffix")
-                        )
-                    } else {
-                        g.record_mutation_with_tag(
-                            Path::new(path),
-                            prior_bytes,
-                            new_tag,
-                            SnapshotOp::Edit,
-                        );
-                        format!("\n[{}#{}]", path, new_tag)
-                    }
+                    store
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_tag(Path::new(path), new_tag);
+                    format!(
+                        "\n[{}#{}]{}",
+                        path,
+                        new_tag,
+                        aish_i18n::t("tools.fs.edit_file.not_undoable_suffix")
+                    )
                 } else {
                     String::new()
                 };
@@ -1575,5 +1639,41 @@ mod tests {
                 "name=orders\nport=18089\nowner=ops\n"
             );
         }
+    }
+
+    #[test]
+    fn issue_692_small_line_edit_records_one_snapshot() {
+        // The prior bytes and the post-edit tag must describe the same source
+        // snapshot. The small-file path now reads once and writes the full
+        // replacement instead of rereading the source in atomic_write_splice.
+        let dir = temp_dir();
+        let file_path = dir.path().join("single.conf");
+        let prior = "name=orders\nport=18088\nowner=ops\n";
+        fs::write(&file_path, prior).unwrap();
+        let path = file_path.to_str().unwrap();
+
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        store.lock().unwrap().record_read(Path::new(path), prior);
+        let tool = EditFileTool::with_store(store.clone());
+        let edited = tool.execute(serde_json::json!({
+            "path": path,
+            "old_string": "18088",
+            "new_string": "18089",
+            "start_line": 2,
+            "end_line": 2
+        }));
+        assert!(edited.ok, "edit failed: {}", edited.output);
+
+        let undo = store
+            .lock()
+            .unwrap()
+            .peek_undo_last_for(Path::new(path))
+            .expect("undo entry");
+        assert_eq!(undo.content.as_deref(), Some(prior.as_bytes()));
+        let disk = fs::read(&file_path).unwrap();
+        assert_eq!(undo.expected_tag, SnapshotTag::from_bytes(&disk));
+        undo.apply_to_disk_checked(false, false)
+            .expect("undo must be drift-free");
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), prior);
     }
 }
