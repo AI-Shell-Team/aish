@@ -3,8 +3,8 @@ use aish_llm::{PreflightResult, Tool, ToolResult};
 
 use super::prompt;
 use crate::fs::{
-    atomic_write, atomic_write_if_unchanged, atomic_write_splice, read_window,
-    ConditionalWriteOutcome, SharedSnapshotStore, SnapshotOp, SnapshotTag, StreamingTagHasher,
+    atomic_write, atomic_write_splice, read_window, SharedSnapshotStore, SnapshotOp, SnapshotTag,
+    SpliceError, SpliceOutput, StreamingTagHasher,
 };
 use std::io::Read;
 use std::path::Path;
@@ -476,127 +476,42 @@ impl EditFileTool {
             return err;
         }
 
-        // Rollback-capable edits must derive the prior bytes and the new
-        // file from ONE snapshot. Reading prior bytes and then letting
-        // atomic_write_splice re-read the source leaves a window where an
-        // external write can land between the two reads: the edit + new tag
-        // would include it, but undo would restore the older prior bytes and
-        // silently drop the external change. Capture the file once and write
-        // the complete replacement from that buffer instead (issue #692
-        // review). Large files are not undoable, so they keep the streaming
-        // splice path below.
-        if self.store.is_some() && file_len <= SNAPSHOT_MAX_BYTES as u64 {
-            let prior_bytes = match std::fs::read(path) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    let mut args_map = std::collections::HashMap::new();
-                    args_map.insert("path".to_string(), path.to_string());
-                    args_map.insert("error".to_string(), e.to_string());
-                    return ToolResult::error(aish_i18n::t_with_args(
-                        "tools.fs.edit_file.edit_read_failed",
-                        &args_map,
-                    ));
-                }
-            };
-            if prior_bytes.len() as u64 != file_len
-                || SnapshotTag::from_bytes(&prior_bytes) != disk_tag
-            {
-                // The file changed between the validation scan and this
-                // snapshot read. Reject instead of recording two different
-                // source versions.
-                let mut args_map = std::collections::HashMap::new();
-                args_map.insert("path".to_string(), path.to_string());
-                return ToolResult::error(aish_i18n::t_with_args(
-                    "tools.fs.edit_file.stale_tag",
-                    &args_map,
-                ));
-            }
-
-            let replaced_len = (window_end - window_start) as usize;
-            let mut new_full = Vec::with_capacity(
-                prior_bytes
-                    .len()
-                    .saturating_sub(replaced_len)
-                    .saturating_add(new_window.len()),
-            );
-            new_full.extend_from_slice(&prior_bytes[..window_start as usize]);
-            new_full.extend_from_slice(new_window.as_bytes());
-            new_full.extend_from_slice(&prior_bytes[window_end as usize..]);
-            let new_tag = SnapshotTag::from_bytes(&new_full);
-
-            // Commit only if the target still matches the snapshot we
-            // recorded. `atomic_write_if_unchanged` uses a commit-time
-            // RENAME_EXCHANGE on Linux, so an external write that lands
-            // between the snapshot read and this commit is preserved and
-            // reported as a conflict instead of being overwritten.
-            return match atomic_write_if_unchanged(Path::new(path), &prior_bytes, &new_full) {
-                Ok(ConditionalWriteOutcome::Written) => {
-                    if let Some(store) = &self.store {
-                        store
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .record_mutation_with_tag(
-                                Path::new(path),
-                                Some(prior_bytes),
-                                new_tag,
-                                SnapshotOp::Edit,
-                            );
-                    }
-                    let mut args_map = std::collections::HashMap::new();
-                    args_map.insert("path".to_string(), path.to_string());
-                    ToolResult::success(format!(
-                        "{}{}\n[{}#{}]",
-                        aish_i18n::t_with_args("tools.fs.edit_file.edit_success", &args_map),
-                        Self::symlink_write_note(path),
-                        path,
-                        new_tag
-                    ))
-                }
-                Ok(ConditionalWriteOutcome::Conflict) => {
-                    let mut args_map = std::collections::HashMap::new();
-                    args_map.insert("path".to_string(), path.to_string());
-                    ToolResult::error(aish_i18n::t_with_args(
-                        "tools.fs.edit_file.stale_tag",
-                        &args_map,
-                    ))
-                }
-                Err(e) => {
-                    let mut args_map = std::collections::HashMap::new();
-                    args_map.insert("path".to_string(), path.to_string());
-                    args_map.insert("error".to_string(), e.to_string());
-                    ToolResult::error(aish_i18n::t_with_args(
-                        "tools.fs.edit_file.edit_write_failed",
-                        &args_map,
-                    ))
-                }
-            };
-        }
-
-        // Pass 2: splice — used when no rollback snapshot is kept (large file
-        // or no store). Untouched head and tail stream straight from the
-        // source file; only the replacement window is materialized.
+        // Pass 2: stream the splice. The same source bytes feed the complete
+        // output tag, the pre-rename source check, and — for undoable small
+        // files — the prior-content snapshot. That keeps rollback bytes and
+        // the post-edit tag on one source version without a second read or a
+        // platform-specific compare-and-swap (issue #692 review).
+        let capture_prior = self.store.is_some() && file_len <= SNAPSHOT_MAX_BYTES as u64;
         match atomic_write_splice(
             Path::new(path),
             window_start,
+            window.as_bytes(),
             new_window.as_bytes(),
             window_end,
+            Some(disk_tag),
+            capture_prior,
         ) {
-            // `atomic_write_splice` hashes exactly the bytes it streams to
-            // disk, so this is the tag of the complete new file — not just
-            // the replacement window. Using the window-only hash made the
-            // next edit and an immediate undo see phantom drift (#692).
-            Ok(new_tag) => {
+            Ok(SpliceOutput { new_tag, prior }) => {
                 let tag_suffix = if let Some(store) = &self.store {
-                    store
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .record_tag(Path::new(path), new_tag);
-                    format!(
-                        "\n[{}#{}]{}",
-                        path,
-                        new_tag,
-                        aish_i18n::t("tools.fs.edit_file.not_undoable_suffix")
-                    )
+                    let mut g = store.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(prior) = prior {
+                        g.record_mutation_with_tag(
+                            Path::new(path),
+                            Some(prior),
+                            new_tag,
+                            SnapshotOp::Edit,
+                        );
+                        format!("\n[{}#{}]", path, new_tag)
+                    } else {
+                        // No rollback snapshot kept; refresh the anchor only.
+                        g.record_tag(Path::new(path), new_tag);
+                        format!(
+                            "\n[{}#{}]{}",
+                            path,
+                            new_tag,
+                            aish_i18n::t("tools.fs.edit_file.not_undoable_suffix")
+                        )
+                    }
                 } else {
                     String::new()
                 };
@@ -609,7 +524,15 @@ impl EditFileTool {
                     tag_suffix
                 ))
             }
-            Err(e) => {
+            Err(SpliceError::SourceChanged) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.stale_tag",
+                    &args_map,
+                ))
+            }
+            Err(SpliceError::Io(e)) => {
                 let mut args_map = std::collections::HashMap::new();
                 args_map.insert("path".to_string(), path.to_string());
                 args_map.insert("error".to_string(), e.to_string());

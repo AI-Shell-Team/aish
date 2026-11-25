@@ -71,8 +71,7 @@ pub mod fs {
     mod atomic_write;
     mod snapshot_store;
     pub use self::atomic_write::{
-        atomic_write, atomic_write_if_unchanged, atomic_write_splice, read_window,
-        ConditionalWriteOutcome,
+        atomic_write, atomic_write_splice, read_window, SpliceError, SpliceOutput,
     };
     pub use self::snapshot_store::{
         ApplyError, ApplyOutcome, DriftStatus, FileSnapshot, SharedSnapshotStore, SnapshotOp,
