@@ -3,6 +3,7 @@ use aish_llm::{Tool, ToolResult};
 
 use super::prompt;
 use crate::fs::SharedSnapshotStore;
+use std::io::Read;
 use std::path::Path;
 
 /// Upper bound on total file bytes we are willing to read into memory and
@@ -64,7 +65,22 @@ impl Tool for ReadFileTool {
             None => return ToolResult::error(aish_i18n::t("tools.fs.read_file.missing_path")),
         };
 
-        let metadata = match std::fs::metadata(path) {
+        // Open once and validate the opened descriptor. Opening with
+        // O_NONBLOCK on Unix prevents a path swapped for a FIFO between the
+        // type check and the read from stalling the session (issue #686).
+        let mut file = match open_read(path) {
+            Ok(file) => file,
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.read_file.read_failed",
+                    &args_map,
+                ));
+            }
+        };
+        let metadata = match file.metadata() {
             Ok(metadata) => metadata,
             Err(e) => {
                 let mut args_map = std::collections::HashMap::new();
@@ -77,11 +93,9 @@ impl Tool for ReadFileTool {
             }
         };
 
-        // Reject non-regular files before any read. A FIFO with no writer
-        // blocks a synchronous read indefinitely and Ctrl+C cannot
-        // interrupt it, leaving the whole session stuck (issue #686).
-        // Directories, sockets and devices are likewise not readable as
-        // text and should be handled through shell commands.
+        // Reject non-regular files before reading. Directories, FIFOs,
+        // sockets and devices are not readable as bounded text and should be
+        // handled through shell commands.
         if !metadata.file_type().is_file() {
             let mut args_map = std::collections::HashMap::new();
             args_map.insert("path".to_string(), path.to_string());
@@ -102,22 +116,21 @@ impl Tool for ReadFileTool {
         // loading the whole file into memory. When no range is given, return
         // a bounded head window and tell the model how to read the rest.
         if file_size > MAX_READ_BYTES {
-            return self.read_large_file(path, file_size, offset, limit);
+            return self.read_large_file(path, file, file_size, offset, limit);
         }
 
-        // Normal path: file fits in the byte budget, read it all.
-        let raw_bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                let mut args_map = std::collections::HashMap::new();
-                args_map.insert("path".to_string(), path.to_string());
-                args_map.insert("error".to_string(), e.to_string());
-                return ToolResult::error(aish_i18n::t_with_args(
-                    "tools.fs.read_file.read_failed",
-                    &args_map,
-                ));
-            }
-        };
+        // Normal path: file fits in the byte budget, read it all from the
+        // already-validated descriptor.
+        let mut raw_bytes = Vec::with_capacity(file_size);
+        if let Err(e) = file.read_to_end(&mut raw_bytes) {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("path".to_string(), path.to_string());
+            args_map.insert("error".to_string(), e.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.read_file.read_failed",
+                &args_map,
+            ));
+        }
 
         let content = match String::from_utf8(raw_bytes) {
             Ok(s) => s,
@@ -177,24 +190,12 @@ impl ReadFileTool {
     fn read_large_file(
         &self,
         path: &str,
+        file: std::fs::File,
         file_size: usize,
         offset: usize,
         limit: Option<usize>,
     ) -> ToolResult {
         use std::io::BufReader;
-
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(e) => {
-                let mut args_map = std::collections::HashMap::new();
-                args_map.insert("path".to_string(), path.to_string());
-                args_map.insert("error".to_string(), e.to_string());
-                return ToolResult::error(aish_i18n::t_with_args(
-                    "tools.fs.read_file.read_failed",
-                    &args_map,
-                ));
-            }
-        };
 
         let mut reader = BufReader::new(file);
         let effective_limit = limit.unwrap_or(DEFAULT_TRUNCATE_LINES);
@@ -301,17 +302,91 @@ impl ReadFileTool {
     }
 }
 
+/// Length of a UTF-8 sequence from its lead byte, if the byte can start one.
+fn utf8_char_len(lead: u8) -> Option<usize> {
+    match lead {
+        0x00..=0x7F => Some(1),
+        0xC2..=0xDF => Some(2),
+        0xE0..=0xEF => Some(3),
+        0xF0..=0xF4 => Some(4),
+        _ => None,
+    }
+}
+
+/// Clip `raw` to at most `MAX_LINE_BYTES` without splitting a valid UTF-8
+/// character.
+///
+/// When the prefix ends mid-character, the crossing character is dropped only
+/// if the retained lookahead proves it is valid. Malformed boundary sequences
+/// such as `E4 FF` or `F0 9F 98 41` are left in place so the caller still
+/// reports a decode error (issue #682). Returns whether the line was clipped.
+fn clip_line_to_utf8(raw: &mut Vec<u8>) -> bool {
+    if raw.len() <= MAX_LINE_BYTES {
+        return false;
+    }
+
+    match std::str::from_utf8(&raw[..MAX_LINE_BYTES]) {
+        Ok(_) => raw.truncate(MAX_LINE_BYTES),
+        Err(e) if e.error_len().is_none() => {
+            let start = e.valid_up_to();
+            // Validate only the character that crosses the boundary, not the
+            // whole suffix (which may itself end mid-character at the retain
+            // limit).
+            let crossing = utf8_char_len(raw[start])
+                .and_then(|len| raw.get(start..start + len))
+                .is_some_and(|bytes| std::str::from_utf8(bytes).is_ok());
+            if crossing {
+                // The crossing character is complete and valid, so dropping
+                // it leaves a valid prefix.
+                raw.truncate(start);
+            } else {
+                // Not enough lookahead to complete the character, or the
+                // sequence is malformed: keep the bounded prefix and let the
+                // caller report the decode error.
+                raw.truncate(MAX_LINE_BYTES);
+            }
+        }
+        Err(_) => raw.truncate(MAX_LINE_BYTES),
+    }
+    true
+}
+
+/// Open `path` for reading without blocking on a FIFO.
+///
+/// On Unix, `O_NONBLOCK` makes a read-only FIFO open return immediately even
+/// when no writer exists; it has no effect on regular files. The caller
+/// checks the opened descriptor's type, so a path swapped after the check
+/// cannot stall the session (issue #686).
+fn open_read(path: &str) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new().read(true).open(path)
+    }
+}
+
 /// Read one newline-terminated line while keeping memory bounded.
 ///
-/// At most `MAX_LINE_BYTES + 2` bytes are retained (the two extra bytes
-/// accommodate a trailing `\r\n`); the remainder of an oversized line is
-/// consumed and discarded so line numbering, `offset` and `limit` stay
-/// correct. Returns `None` on a clean EOF between lines, otherwise the line
-/// bytes without their terminator plus whether the line had to be clipped.
+/// At most `MAX_LINE_BYTES + 4` bytes are retained: three lookahead bytes to
+/// validate a 4-byte UTF-8 character crossing the clip boundary, plus one byte
+/// of CRLF margin. The remainder of an oversized line is consumed and
+/// discarded so line numbering, `offset` and `limit` stay correct. Returns
+/// `None` on a clean EOF between lines, otherwise the line bytes without their
+/// terminator plus whether the line had to be clipped.
 fn read_line_bounded<R: std::io::BufRead>(
     reader: &mut R,
 ) -> std::io::Result<Option<(Vec<u8>, bool)>> {
-    const RETAIN_LIMIT: usize = MAX_LINE_BYTES + 2;
+    // Keep up to three lookahead bytes past the clip point so a 4-byte
+    // UTF-8 character crossing the boundary can be validated, plus one byte
+    // of CRLF margin.
+    const RETAIN_LIMIT: usize = MAX_LINE_BYTES + 4;
 
     let mut raw: Vec<u8> = Vec::with_capacity(128);
     let mut saw_bytes = false;
@@ -347,20 +422,7 @@ fn read_line_bounded<R: std::io::BufRead>(
             raw.pop();
         }
     }
-    let clipped = raw.len() > MAX_LINE_BYTES;
-    if clipped {
-        raw.truncate(MAX_LINE_BYTES);
-        // Never split a UTF-8 code point at the clip boundary: a line that is
-        // valid UTF-8 on disk must not become a decode error just because the
-        // retained prefix ends mid-character (issue #682). Only trim an
-        // incomplete trailing sequence; genuinely invalid bytes are still
-        // reported as a decode error by the caller.
-        if let Err(e) = std::str::from_utf8(&raw) {
-            if e.error_len().is_none() {
-                raw.truncate(e.valid_up_to());
-            }
-        }
-    }
+    let clipped = clip_line_to_utf8(&mut raw);
     Ok(Some((raw, clipped)))
 }
 
@@ -720,5 +782,48 @@ mod tests {
             result.output.contains("中文运维"),
             "clipped line should keep complete characters"
         );
+    }
+
+    #[test]
+    fn clip_line_to_utf8_handles_valid_and_malformed_boundaries() {
+        // A valid 4-byte character crossing the boundary is dropped.
+        let mut valid = vec![b'A'; MAX_LINE_BYTES - 1];
+        valid.extend_from_slice("😀".as_bytes());
+        assert!(clip_line_to_utf8(&mut valid));
+        assert_eq!(valid.len(), MAX_LINE_BYTES - 1);
+        assert!(std::str::from_utf8(&valid).is_ok());
+
+        // Incomplete lead byte followed by an invalid continuation.
+        let mut bad = vec![b'A'; MAX_LINE_BYTES - 1];
+        bad.extend_from_slice(&[0xE4, 0xFF]);
+        assert!(clip_line_to_utf8(&mut bad));
+        assert_eq!(bad.len(), MAX_LINE_BYTES);
+        assert!(std::str::from_utf8(&bad).is_err());
+
+        // Three continuation bytes followed by an invalid fourth byte.
+        let mut bad4 = vec![b'A'; MAX_LINE_BYTES - 1];
+        bad4.extend_from_slice(&[0xF0, 0x9F, 0x98, 0x41]);
+        assert!(clip_line_to_utf8(&mut bad4));
+        assert_eq!(bad4.len(), MAX_LINE_BYTES);
+        assert!(std::str::from_utf8(&bad4).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_file_follows_symlink_to_regular_file() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let real = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&real, "hello\n").unwrap();
+        std::os::unix::fs::symlink("real.txt", &link).unwrap();
+
+        let tool = ReadFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": link.to_str().unwrap()
+        }));
+
+        assert!(result.ok, "symlink read failed: {}", result.output);
+        assert!(result.output.contains("hello"));
     }
 }
