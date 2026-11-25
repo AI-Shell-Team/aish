@@ -1571,6 +1571,7 @@ tools:
       access_denied: "拒绝访问: 路径不在 offload 目录内"
       large_file_truncated: "\n[... 文件 {path} 为 {size} 字节 / 共 {lines} 行；显示从偏移 {offset} 开始的 {shown} 行。使用 offset/limit 读取更多 ...]"
       large_file_no_tag: "大文件：部分读取，无快照标签"
+      unsupported_file_type: "无法读取 {path}：不是普通文件。read_file 仅支持普通文件；管道、套接字或设备请使用 shell 命令。"
     write_file:
       missing_path: "缺少 'path' 参数"
       missing_content: "缺少 'content' 参数"

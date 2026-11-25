@@ -1572,6 +1572,7 @@ tools:
       access_denied: "Access denied: path is not inside offload directory"
       large_file_truncated: "\n[... file {path} is {size} bytes / {lines} lines; showing {shown} lines from offset {offset}. Use offset/limit to read more ...]"
       large_file_no_tag: "large file: partial read, no snapshot tag available"
+      unsupported_file_type: "Cannot read {path}: not a regular file. read_file only supports regular files; use a shell command for pipes, sockets, or devices."
     write_file:
       missing_path: "Missing 'path' parameter"
       missing_content: "Missing 'content' parameter"
