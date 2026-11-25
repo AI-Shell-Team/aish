@@ -1208,6 +1208,7 @@ tools:
       not_undoable_confirm: "{path} を編集します：既存の内容のスナップショットを作成できないため、この変更は取り消せません（/undo では復元できません）。続行しますか？"
       stale_tag: "ファイル {path} は最後の読み取り以降に変更されました — 編集前に再読み込みしてください"
       invalid_tag: "{path} のスナップショットタグ '{tag}' が無効です"
+      tag_mismatch: "{path} のスナップショットタグが一致しません：指定されたタグは現在のファイル内容と一致しません（期待値 {expected}）— 編集前にファイルを再読み込みしてください。"
       invalid_line_range: "無効な行範囲: start_line={start}, end_line={end}。start_line は >= 1、end_line は start_line 以上である必要があります。"
       line_range_out_of_bounds: "行範囲の開始 {start} がファイル長({lines} 行)を超えています。ファイル内の start_line を使用してください。"
       not_undoable_suffix: "（元に戻せません：以前の内容が大きすぎます）"

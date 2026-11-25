@@ -9,6 +9,9 @@ Usage:
 - Prefer matching file names, not file contents (use grep for content search).
 - Use one broad recursive pattern (e.g. /etc/**/*ssh*) before trying many narrow patterns.
 - Set root to limit scope when the task names a directory.
+- If a directory cannot be read, the result states that the search was
+  incomplete and lists the skipped path so you do not mistake it for a
+  definitive "no files found".
 - Parallel globs are fine when roots or patterns are independent; do not repeat the same search."#;
 
 pub(crate) fn parameters() -> serde_json::Value {

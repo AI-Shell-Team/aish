@@ -203,18 +203,12 @@ impl Tool for EditFileTool {
                 ));
             }
         }
-        // Validate an explicit tag's format when supplied. The drift check
-        // above already covers staleness regardless of the tag value.
-        if let Some(tag) = tag {
-            if tag.parse::<SnapshotTag>().is_err() {
-                let mut args_map = std::collections::HashMap::new();
-                args_map.insert("path".to_string(), path.to_string());
-                args_map.insert("tag".to_string(), tag.to_string());
-                return ToolResult::error(aish_i18n::t_with_args(
-                    "tools.fs.edit_file.invalid_tag",
-                    &args_map,
-                ));
-            }
+        // An explicit tag must match the content actually on disk. Without
+        // this, a caller can pass a syntactically valid but unrelated tag and
+        // still edit a file it never read (issue #696).
+        let disk_tag = SnapshotTag::from_content(&content);
+        if let Some(err) = Self::check_explicit_tag(path, tag, disk_tag) {
+            return err;
         }
 
         self.write_and_record(path, content, new_content)
@@ -254,6 +248,44 @@ impl EditFileTool {
             message: aish_i18n::t_with_args("tools.fs.edit_file.not_undoable_confirm", &args_map),
             security: None,
         }
+    }
+
+    /// Validate a caller-supplied `tag` against the tag of the content that
+    /// is actually on disk. Returns a ready error result when the tag is
+    /// malformed or does not match; `None` means the edit may proceed.
+    ///
+    /// The session store's drift check is separate: it rejects files that
+    /// changed since an earlier read. This check rejects an explicitly wrong
+    /// tag even for a file the session never observed (issue #696).
+    fn check_explicit_tag(
+        path: &str,
+        tag: Option<&str>,
+        disk_tag: SnapshotTag,
+    ) -> Option<ToolResult> {
+        let raw = tag?;
+        let parsed = match raw.parse::<SnapshotTag>() {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("tag".to_string(), raw.to_string());
+                return Some(ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.invalid_tag",
+                    &args_map,
+                )));
+            }
+        };
+        if parsed != disk_tag {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("path".to_string(), path.to_string());
+            args_map.insert("tag".to_string(), raw.to_string());
+            args_map.insert("expected".to_string(), disk_tag.as_hex());
+            return Some(ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.edit_file.tag_mismatch",
+                &args_map,
+            )));
+        }
+        None
     }
 
     fn edit_line_range(
@@ -438,18 +470,10 @@ impl EditFileTool {
                 ));
             }
         }
-        // Validate an explicit tag's format when supplied. The drift check
-        // above already covers staleness regardless of the tag value.
-        if let Some(tag) = tag {
-            if tag.parse::<SnapshotTag>().is_err() {
-                let mut args_map = std::collections::HashMap::new();
-                args_map.insert("path".to_string(), path.to_string());
-                args_map.insert("tag".to_string(), tag.to_string());
-                return ToolResult::error(aish_i18n::t_with_args(
-                    "tools.fs.edit_file.invalid_tag",
-                    &args_map,
-                ));
-            }
+        // An explicit tag must match the streamed hash of the file on disk;
+        // otherwise the caller is editing a version it never observed (#696).
+        if let Some(err) = Self::check_explicit_tag(path, tag, disk_tag) {
+            return err;
         }
 
         // Capture the full prior content for /undo when the file is small
@@ -471,14 +495,13 @@ impl EditFileTool {
             new_window.as_bytes(),
             window_end,
         ) {
-            Ok(()) => {
+            // `atomic_write_splice` hashes exactly the bytes it streams to
+            // disk, so this is the tag of the complete new file — not just
+            // the replacement window. Using the window-only hash made the
+            // next edit and an immediate undo see phantom drift (#692).
+            Ok(new_tag) => {
                 let tag_suffix = if let Some(store) = &self.store {
                     let mut g = store.lock().unwrap_or_else(|e| e.into_inner());
-                    // The new content = head + new_window + tail. When the
-                    // file fits the snapshot budget it is fully loaded in
-                    // prior_bytes anyway; otherwise refresh the tag from the
-                    // splice components.
-                    let new_tag = SnapshotTag::from_content(&new_window);
                     if skip {
                         // Prior too large for rollback memory; refresh tag only.
                         g.record_tag(Path::new(path), new_tag);
@@ -489,10 +512,10 @@ impl EditFileTool {
                             aish_i18n::t("tools.fs.edit_file.not_undoable_suffix")
                         )
                     } else {
-                        g.record_mutation(
+                        g.record_mutation_with_tag(
                             Path::new(path),
                             prior_bytes,
-                            &new_window,
+                            new_tag,
                             SnapshotOp::Edit,
                         );
                         format!("\n[{}#{}]", path, new_tag)
@@ -1376,6 +1399,180 @@ mod tests {
             assert!(
                 ok,
                 "the preserved ACL should still let uid 65534 read the file"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_692_line_range_edits_chain_and_undo_immediately() {
+        // A line-range edit must refresh the session anchor with the tag of
+        // the WHOLE new file. Recording only the replacement window made the
+        // next edit and an immediate undo look like external drift.
+        let dir = temp_dir();
+        let file_path = dir.path().join("app.conf");
+        let prior = "name=orders\nport=18088\nowner=ops\n";
+        fs::write(&file_path, prior).unwrap();
+        let path = file_path.to_str().unwrap();
+
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        store.lock().unwrap().record_read(Path::new(path), prior);
+
+        let tool = EditFileTool::with_store(store.clone());
+        let first = tool.execute(serde_json::json!({
+            "path": path,
+            "old_string": "18088",
+            "new_string": "18089",
+            "start_line": 2,
+            "end_line": 2
+        }));
+        assert!(first.ok, "first line edit failed: {}", first.output);
+
+        // The regression: continuing on the result of the first edit.
+        let second = tool.execute(serde_json::json!({
+            "path": path,
+            "old_string": "ops",
+            "new_string": "sre",
+            "start_line": 3,
+            "end_line": 3
+        }));
+        assert!(second.ok, "second line edit failed: {}", second.output);
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "name=orders\nport=18089\nowner=sre\n"
+        );
+
+        // Undo the second edit: the anchor must match the current disk bytes.
+        let undo = crate::undo_edit::UndoEditTool::new(store.clone());
+        let undone = undo.execute(serde_json::json!({"path": path}));
+        assert!(undone.ok, "undo failed: {}", undone.output);
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "name=orders\nport=18089\nowner=ops\n"
+        );
+
+        // A separate file reproduces the "edit once, undo immediately" path.
+        let fresh = dir.path().join("fresh.conf");
+        fs::write(&fresh, prior).unwrap();
+        let fresh_path = fresh.to_str().unwrap();
+        store
+            .lock()
+            .unwrap()
+            .record_read(Path::new(fresh_path), prior);
+        let edit = tool.execute(serde_json::json!({
+            "path": fresh_path,
+            "old_string": "18088",
+            "new_string": "18089",
+            "start_line": 2,
+            "end_line": 2
+        }));
+        assert!(edit.ok, "single line edit failed: {}", edit.output);
+        let undo = crate::undo_edit::UndoEditTool::new(store.clone());
+        let undone = undo.execute(serde_json::json!({"path": fresh_path}));
+        assert!(undone.ok, "immediate undo failed: {}", undone.output);
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), prior);
+    }
+
+    #[test]
+    fn issue_692_line_range_edit_still_detects_later_external_drift() {
+        let dir = temp_dir();
+        let file_path = dir.path().join("drift.conf");
+        let prior = "name=orders\nport=18088\nowner=ops\n";
+        fs::write(&file_path, prior).unwrap();
+        let path = file_path.to_str().unwrap();
+
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        store.lock().unwrap().record_read(Path::new(path), prior);
+        let tool = EditFileTool::with_store(store.clone());
+
+        let first = tool.execute(serde_json::json!({
+            "path": path,
+            "old_string": "18088",
+            "new_string": "18089",
+            "start_line": 2,
+            "end_line": 2
+        }));
+        assert!(first.ok, "first edit failed: {}", first.output);
+
+        // Another process writes after AISH's first edit.
+        fs::write(&file_path, "name=orders\nport=9999\nowner=ops\n").unwrap();
+        let second = tool.execute(serde_json::json!({
+            "path": path,
+            "old_string": "ops",
+            "new_string": "sre",
+            "start_line": 3,
+            "end_line": 3
+        }));
+        assert!(!second.ok, "external drift must still be rejected");
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "name=orders\nport=9999\nowner=ops\n"
+        );
+    }
+
+    #[test]
+    fn issue_696_explicit_tag_must_match_disk_content() {
+        aish_i18n::set_locale("en-US");
+        let prior = "name=orders\nport=18088\nowner=ops\n";
+
+        // Exercise both the full-file path and the line-range path.
+        for (label, with_range) in [("full", false), ("range", true)] {
+            let dir = temp_dir();
+            let file_path = dir.path().join(format!("{label}.conf"));
+            fs::write(&file_path, prior).unwrap();
+            let path = file_path.to_str().unwrap();
+
+            let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+            store.lock().unwrap().record_read(Path::new(path), prior);
+            let tool = EditFileTool::with_store(store.clone());
+
+            let actual = SnapshotTag::from_content(prior).as_hex();
+            let wrong = if actual == "0000" { "FFFF" } else { "0000" };
+            let mut args = serde_json::json!({
+                "path": path,
+                "old_string": "18088",
+                "new_string": "18089",
+                "tag": wrong
+            });
+            if with_range {
+                args["start_line"] = serde_json::json!(2);
+                args["end_line"] = serde_json::json!(2);
+            }
+
+            let rejected = tool.execute(args);
+            assert!(
+                !rejected.ok,
+                "{label}: a mismatched explicit tag must be rejected"
+            );
+            assert!(
+                rejected.output.contains("tag") && rejected.output.contains("mismatch"),
+                "{label}: expected a tag-mismatch message, got: {}",
+                rejected.output
+            );
+            assert_eq!(
+                fs::read_to_string(&file_path).unwrap(),
+                prior,
+                "{label}: rejected edit must leave the file untouched"
+            );
+
+            let mut args = serde_json::json!({
+                "path": path,
+                "old_string": "18088",
+                "new_string": "18089",
+                "tag": actual
+            });
+            if with_range {
+                args["start_line"] = serde_json::json!(2);
+                args["end_line"] = serde_json::json!(2);
+            }
+            let accepted = tool.execute(args);
+            assert!(
+                accepted.ok,
+                "{label}: the correct tag must allow the edit: {}",
+                accepted.output
+            );
+            assert_eq!(
+                fs::read_to_string(&file_path).unwrap(),
+                "name=orders\nport=18089\nowner=ops\n"
             );
         }
     }
