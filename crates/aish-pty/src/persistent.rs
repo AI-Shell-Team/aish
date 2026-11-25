@@ -4642,22 +4642,90 @@ impl PersistentPty {
     }
 
     fn write_master(&self, data: &[u8]) -> aish_core::Result<()> {
-        let mut written = 0;
-        while written < data.len() {
-            match unsafe {
-                libc::write(
-                    self.master_fd,
-                    data[written..].as_ptr() as *const libc::c_void,
-                    data.len() - written,
-                )
-            } {
-                n if n > 0 => written += n as usize,
-                _ => {
-                    return Err(AishError::Pty("failed to write to master fd".into()));
+        let fd = self.master_fd;
+        let result = write_all_waiting(
+            data,
+            |remaining| {
+                let rc = unsafe {
+                    libc::write(
+                        fd,
+                        remaining.as_ptr() as *const libc::c_void,
+                        remaining.len(),
+                    )
+                };
+                if rc >= 0 {
+                    Ok(rc as usize)
+                } else {
+                    Err(std::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(libc::EIO))
+                }
+            },
+            || wait_fd_writable(fd, Duration::from_secs(5)),
+        );
+        result.map_err(|errno| {
+            AishError::Pty(format!("failed to write to master fd (errno {errno})"))
+        })
+    }
+}
+
+/// Write all of `buf`, retrying `EINTR` and waiting for `EAGAIN` instead of
+/// failing immediately.
+///
+/// The PTY master is non-blocking (reads use `select`), so a busy shell can
+/// temporarily fill the PTY input queue. Treating `EAGAIN` as fatal drops the
+/// command payload — the shell then sees a truncated line, or a `source` path
+/// whose file has already been cleaned up, and never starts the command.
+fn write_all_waiting<F, W>(buf: &[u8], mut write_once: F, mut wait_writable: W) -> Result<(), i32>
+where
+    F: FnMut(&[u8]) -> Result<usize, i32>,
+    W: FnMut() -> bool,
+{
+    let mut remaining = buf;
+    while !remaining.is_empty() {
+        match write_once(remaining) {
+            Ok(0) => return Err(libc::EIO),
+            Ok(written) => remaining = &remaining[written.min(remaining.len())..],
+            Err(errno) if errno == libc::EINTR => continue,
+            Err(errno) if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK => {
+                if !wait_writable() {
+                    return Err(libc::ETIMEDOUT);
                 }
             }
+            Err(errno) => return Err(errno),
         }
-        Ok(())
+    }
+    Ok(())
+}
+
+/// Wait until `fd` is writable or `timeout` elapses. Returns false on timeout
+/// or an error other than `EINTR`.
+fn wait_fd_writable(fd: RawFd, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let millis = remaining.as_millis().min(i32::MAX as u128).max(1) as libc::c_int;
+        let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
+        if ready > 0 {
+            return true;
+        }
+        if ready == 0 {
+            return false;
+        }
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO);
+        if errno != libc::EINTR {
+            return false;
+        }
     }
 }
 
@@ -7810,6 +7878,41 @@ mod tests {
         panic!("PersistentPty::start failed after retries: {:?}", last_err);
     }
 
+    /// Window for the cancelled command to reach its first step. CI runners
+    /// share CPU and can delay command dispatch well past a couple of seconds;
+    /// a tight deadline here only flakes.
+    const CANCEL_READY_TIMEOUT: Duration = Duration::from_secs(30);
+    /// Must exceed [`CANCEL_READY_TIMEOUT`] so a slow start is reported by the
+    /// interrupter with a clear message instead of the command timing out.
+    const CANCELLED_COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
+    /// How long the foreground `sleep` runs before the tail. It must be long
+    /// enough that a scheduling delay between setting the cancel token and the
+    /// exec loop noticing it cannot let the tail execute before cancellation.
+    /// A genuine cancellation failure still surfaces after this window.
+    const CANCEL_HOLD_SECS: u64 = 10;
+
+    fn wait_for_path(path: &std::path::Path, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        path.exists()
+    }
+
+    /// Run a no-op command to wait until the shell has processed everything
+    /// queued by the cancelled command. Without this, a cancellation that
+    /// failed to stop its tail leaves later commands queued, so the next
+    /// attempt's start marker can appear late and look like a startup failure.
+    fn drain_cancelled_shell(pty: &mut PersistentPty) {
+        let (output, exit_code, _) = pty
+            .execute_command(":", Duration::from_secs(30), None, false)
+            .expect("drain command");
+        assert_eq!(exit_code, 0, "drain command failed: {output:?}");
+    }
+
     #[test]
     fn test_danger_level_max() {
         assert!(matches!(
@@ -8957,6 +9060,61 @@ mod tests {
     }
 
     #[test]
+    fn write_all_waiting_retries_eagain_until_reader_drains() {
+        use std::io::Read;
+
+        let (read_end, write_end) = pipe().expect("pipe");
+        set_nonblocking(&write_end).expect("nonblocking write end");
+        let write_fd = write_end.as_raw_fd();
+
+        // Fill the pipe until write reports EAGAIN; the payload below can only
+        // be delivered once the reader drains this backlog.
+        let filler = [b'f'; 4096];
+        let mut queued = 0usize;
+        loop {
+            let n = unsafe { libc::write(write_fd, filler.as_ptr().cast(), filler.len()) };
+            if n > 0 {
+                queued += n as usize;
+                continue;
+            }
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            assert_eq!(errno, libc::EAGAIN, "expected a full pipe");
+            break;
+        }
+
+        let payload = b"--tail-payload--";
+        let total = queued + payload.len();
+        let reader = std::thread::spawn(move || {
+            let mut file = std::fs::File::from(read_end);
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).expect("read pipe");
+            bytes
+        });
+
+        let result = write_all_waiting(
+            payload,
+            |remaining| {
+                let n =
+                    unsafe { libc::write(write_fd, remaining.as_ptr().cast(), remaining.len()) };
+                if n >= 0 {
+                    Ok(n as usize)
+                } else {
+                    Err(std::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(libc::EIO))
+                }
+            },
+            || wait_fd_writable(write_fd, Duration::from_secs(2)),
+        );
+        assert_eq!(result, Ok(()), "write must wait for EAGAIN to clear");
+        drop(write_end);
+
+        let bytes = reader.join().expect("reader thread");
+        assert_eq!(bytes.len(), total);
+        assert_eq!(&bytes[queued..], payload);
+    }
+
+    #[test]
     fn test_shell_quote_escape() {
         assert_eq!(shell_quote_escape("ls -la"), "'ls -la'");
         assert_eq!(shell_quote_escape("it's"), "'it'\\''s'");
@@ -9102,30 +9260,30 @@ mod tests {
             let cancel = std::sync::Arc::clone(&token);
             let started_for_thread = started.clone();
             let interrupter = std::thread::spawn(move || {
-                let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
-                while !started_for_thread.exists() && std::time::Instant::now() < ready_deadline {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
                 assert!(
-                    started_for_thread.exists(),
-                    "command never reached its first step"
+                    wait_for_path(&started_for_thread, CANCEL_READY_TIMEOUT),
+                    "attempt {attempt}: command never reached its first step within {CANCEL_READY_TIMEOUT:?}"
                 );
                 std::thread::sleep(Duration::from_millis(150));
                 cancel.cancel_as_user_interrupt();
             });
 
             let command = format!(
-                "touch {}; sleep 3; touch {}",
+                ": > {}; sleep {CANCEL_HOLD_SECS}; : > {}",
                 shell_quote_escape(&started.display().to_string()),
                 shell_quote_escape(&marker.display().to_string())
             );
-            let result = pty.execute_command(&command, Duration::from_secs(8), Some(&token), false);
+            let result =
+                pty.execute_command(&command, CANCELLED_COMMAND_TIMEOUT, Some(&token), false);
             interrupter.join().expect("cancellation thread");
             let (output, exit_code, _) = result.expect("cancelled command must return");
             assert_eq!(
                 exit_code, -1,
                 "cancelled command returned {exit_code}: {output:?}"
             );
+            // Let a tail that survived cancellation run (and finish) before
+            // the next attempt, so queued work cannot delay its start marker.
+            drain_cancelled_shell(&mut pty);
             if marker.exists() {
                 first_unexpected_output = Some(output);
                 break;
@@ -9133,7 +9291,7 @@ mod tests {
         }
 
         let (output, exit_code, _) = pty
-            .execute_command("printf session_ok", Duration::from_secs(5), None, false)
+            .execute_command("printf session_ok", CANCEL_READY_TIMEOUT, None, false)
             .expect("follow-up command");
         assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
         assert!(output.contains("session_ok"), "got: {output:?}");
@@ -9172,37 +9330,35 @@ mod tests {
             let cancel = std::sync::Arc::clone(&token);
             let started_for_thread = started.clone();
             let interrupter = std::thread::spawn(move || {
-                let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
-                while !started_for_thread.exists() && std::time::Instant::now() < ready_deadline {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
                 assert!(
-                    started_for_thread.exists(),
-                    "command never reached its first step"
+                    wait_for_path(&started_for_thread, CANCEL_READY_TIMEOUT),
+                    "attempt {attempt}: command never reached its first step within {CANCEL_READY_TIMEOUT:?}"
                 );
                 std::thread::sleep(Duration::from_millis(150));
                 cancel.cancel_as_user_interrupt();
             });
 
             let command = format!(
-                "set +m; helper() {{ {handler}; touch {}; sleep 3; touch {}; }}; helper; touch {}",
+                "set +m; helper() {{ {handler}; : > {}; sleep {CANCEL_HOLD_SECS}; : > {}; }}; helper; : > {}",
                 shell_quote_escape(&started.display().to_string()),
                 shell_quote_escape(&marker.display().to_string()),
                 shell_quote_escape(&source_tail.display().to_string())
             );
-            let result = pty.execute_command(&command, Duration::from_secs(8), Some(&token), false);
+            let result =
+                pty.execute_command(&command, CANCELLED_COMMAND_TIMEOUT, Some(&token), false);
             interrupter.join().expect("cancellation thread");
             let (output, exit_code, _) = result.expect("cancelled command must return");
             assert_eq!(
                 exit_code, -1,
                 "cancelled command returned {exit_code}: {output:?}"
             );
+            drain_cancelled_shell(&mut pty);
         }
 
         let (output, exit_code, _) = pty
             .execute_command(
                 "trap - INT; printf session_ok",
-                Duration::from_secs(5),
+                CANCEL_READY_TIMEOUT,
                 None,
                 false,
             )
@@ -9234,34 +9390,33 @@ mod tests {
         let cancel = std::sync::Arc::clone(&token);
         let started_for_thread = started.clone();
         let interrupter = std::thread::spawn(move || {
-            let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while !started_for_thread.exists() && std::time::Instant::now() < ready_deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
             assert!(
-                started_for_thread.exists(),
-                "command never reached its marker"
+                wait_for_path(&started_for_thread, CANCEL_READY_TIMEOUT),
+                "command never reached its marker within {CANCEL_READY_TIMEOUT:?}"
             );
             std::thread::sleep(Duration::from_millis(150));
             cancel.cancel_as_user_interrupt();
         });
 
         let command = format!(
-            "trap ':' DEBUG; touch {}; sleep 3; touch {}",
+            "trap ':' DEBUG; : > {}; sleep {CANCEL_HOLD_SECS}; : > {}",
             shell_quote_escape(&started.display().to_string()),
             shell_quote_escape(&tail.display().to_string())
         );
-        let result = pty.execute_command(&command, Duration::from_secs(8), Some(&token), false);
+        let result = pty.execute_command(&command, CANCELLED_COMMAND_TIMEOUT, Some(&token), false);
         interrupter.join().expect("cancellation thread");
         let (output, exit_code, _) = result.expect("cancelled command must return");
         assert_eq!(exit_code, -1, "cancelled command returned: {output:?}");
-        assert!(!tail.exists(), "cancelled source must stop before its tail");
 
+        // Drain before checking the tail: a cancellation that failed to stop
+        // the `sleep` must be caught here, not after the test has already
+        // returned from the follow-up command.
         let (output, exit_code, _) = pty
-            .execute_command("printf session_ok", Duration::from_secs(5), None, false)
+            .execute_command("printf session_ok", Duration::from_secs(30), None, false)
             .expect("follow-up command");
         assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
         assert!(output.contains("session_ok"), "got: {output:?}");
+        assert!(!tail.exists(), "cancelled source must stop before its tail");
 
         pty.stop();
         let _ = std::fs::remove_dir_all(&cwd);
