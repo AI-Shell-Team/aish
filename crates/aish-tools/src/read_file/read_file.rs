@@ -77,6 +77,20 @@ impl Tool for ReadFileTool {
             }
         };
 
+        // Reject non-regular files before any read. A FIFO with no writer
+        // blocks a synchronous read indefinitely and Ctrl+C cannot
+        // interrupt it, leaving the whole session stuck (issue #686).
+        // Directories, sockets and devices are likewise not readable as
+        // text and should be handled through shell commands.
+        if !metadata.file_type().is_file() {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("path".to_string(), path.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.read_file.unsupported_file_type",
+                &args_map,
+            ));
+        }
+
         let file_size = metadata.len() as usize;
         let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
         let limit = args
@@ -336,6 +350,16 @@ fn read_line_bounded<R: std::io::BufRead>(
     let clipped = raw.len() > MAX_LINE_BYTES;
     if clipped {
         raw.truncate(MAX_LINE_BYTES);
+        // Never split a UTF-8 code point at the clip boundary: a line that is
+        // valid UTF-8 on disk must not become a decode error just because the
+        // retained prefix ends mid-character (issue #682). Only trim an
+        // incomplete trailing sequence; genuinely invalid bytes are still
+        // reported as a decode error by the caller.
+        if let Err(e) = std::str::from_utf8(&raw) {
+            if e.error_len().is_none() {
+                raw.truncate(e.valid_up_to());
+            }
+        }
     }
     Ok(Some((raw, clipped)))
 }
@@ -631,6 +655,70 @@ mod tests {
             result.output.contains("Access denied"),
             "Expected access denied error, got: {}",
             result.output
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_file_rejects_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let pipe = dir.path().join("wait.pipe");
+        let cpath = CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+        let tool = ReadFileTool::new();
+        let started = std::time::Instant::now();
+        let result = tool.execute(serde_json::json!({
+            "path": pipe.to_str().unwrap()
+        }));
+        let elapsed = started.elapsed();
+
+        assert!(!result.ok, "FIFO must be rejected: {}", result.output);
+        assert!(
+            result.output.contains("not a regular file"),
+            "expected a clear non-regular-file error, got: {}",
+            result.output
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "FIFO read must not block (took {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn test_read_file_large_utf8_line_is_clipped_at_char_boundary() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let file_path = dir.path().join("chinese.log");
+        // 360 KB of valid UTF-8 on a single line, above MAX_READ_BYTES.
+        let content = format!("{}\n", "中文运维".repeat(30000));
+        fs::write(&file_path, &content).unwrap();
+
+        let tool = ReadFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "offset": 0,
+            "limit": 1
+        }));
+
+        assert!(
+            result.ok,
+            "valid UTF-8 must not fail to decode when clipped: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("line truncated"),
+            "expected a truncation notice, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("中文运维"),
+            "clipped line should keep complete characters"
         );
     }
 }
