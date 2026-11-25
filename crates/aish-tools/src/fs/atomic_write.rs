@@ -298,7 +298,18 @@ fn atomic_write_if_unchanged_linux(
     }
 
     // Conflict: put the external content back at `target` and discard our
-    // replacement from the temp path.
+    // replacement from the temp path. First make sure no writer touched the
+    // target after our exchange; swapping back over such a write would lose
+    // it. If they did, keep their latest content and leave the pre-exchange
+    // snapshot at `tmp` for recovery.
+    let target_still_ours = std::fs::read(target)
+        .map(|current| current == contents)
+        .unwrap_or(false);
+    if !target_still_ours {
+        sync_parent_dir(target);
+        return Ok(ConditionalWriteOutcome::Conflict);
+    }
+
     match rename_exchange(&tmp, target) {
         Ok(()) => {
             let _ = std::fs::remove_file(&tmp);
