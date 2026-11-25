@@ -3,8 +3,8 @@ use aish_llm::{PreflightResult, Tool, ToolResult};
 
 use super::prompt;
 use crate::fs::{
-    atomic_write, atomic_write_splice, read_window, SharedSnapshotStore, SnapshotOp, SnapshotTag,
-    StreamingTagHasher,
+    atomic_write, atomic_write_if_unchanged, atomic_write_splice, read_window,
+    ConditionalWriteOutcome, SharedSnapshotStore, SnapshotOp, SnapshotTag, StreamingTagHasher,
 };
 use std::io::Read;
 use std::path::Path;
@@ -524,8 +524,13 @@ impl EditFileTool {
             new_full.extend_from_slice(&prior_bytes[window_end as usize..]);
             let new_tag = SnapshotTag::from_bytes(&new_full);
 
-            return match atomic_write(Path::new(path), &new_full) {
-                Ok(()) => {
+            // Commit only if the target still matches the snapshot we
+            // recorded. `atomic_write_if_unchanged` uses a commit-time
+            // RENAME_EXCHANGE on Linux, so an external write that lands
+            // between the snapshot read and this commit is preserved and
+            // reported as a conflict instead of being overwritten.
+            return match atomic_write_if_unchanged(Path::new(path), &prior_bytes, &new_full) {
+                Ok(ConditionalWriteOutcome::Written) => {
                     if let Some(store) = &self.store {
                         store
                             .lock()
@@ -545,6 +550,14 @@ impl EditFileTool {
                         Self::symlink_write_note(path),
                         path,
                         new_tag
+                    ))
+                }
+                Ok(ConditionalWriteOutcome::Conflict) => {
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("path".to_string(), path.to_string());
+                    ToolResult::error(aish_i18n::t_with_args(
+                        "tools.fs.edit_file.stale_tag",
+                        &args_map,
                     ))
                 }
                 Err(e) => {
