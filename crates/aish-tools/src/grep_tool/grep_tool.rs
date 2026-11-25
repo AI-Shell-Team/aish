@@ -264,21 +264,49 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
             continue;
         }
 
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
         let rel_path = file_path
             .strip_prefix(&root)
             .unwrap_or(&file_path)
             .display()
             .to_string();
 
-        for (line_no, line_result) in reader.lines().enumerate() {
+        // Read raw bytes per line and decode lossily. `BufRead::lines()`
+        // rejects the whole line on invalid UTF-8, which made a Latin-1 log
+        // containing "ERROR" invisible and produced a false "No matches"
+        // result. Lossy decoding keeps ASCII matches while showing invalid
+        // bytes as U+FFFD, matching OpenCode's ripgrep handling.
+        let mut raw_line = Vec::new();
+        let mut line_no = 0usize;
+        loop {
             if matches.len() >= DEFAULT_MAX_RESULTS {
                 break;
             }
-            let Ok(line) = line_result else {
-                continue;
-            };
+            raw_line.clear();
+            match reader.read_until(b'\n', &mut raw_line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    // A real read failure means this file was not fully
+                    // searched; keep the matches collected so far and mark
+                    // the scope incomplete.
+                    skipped.push(file_path, format!("read error: {e}"));
+                    break;
+                }
+            }
+            line_no += 1;
+
+            // Match BufRead::lines() newline stripping.
+            let mut end = raw_line.len();
+            if end > 0 && raw_line[end - 1] == b'\n' {
+                end -= 1;
+                if end > 0 && raw_line[end - 1] == b'\r' {
+                    end -= 1;
+                }
+            }
+            let line = String::from_utf8_lossy(&raw_line[..end]);
             if re.is_match(&line) {
+                let line = line.as_ref();
                 let truncated = if line.len() > MAX_LINE_LENGTH {
                     let end = line
                         .char_indices()
@@ -288,9 +316,9 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
                         .unwrap_or(0);
                     format!("{}...", &line[..end])
                 } else {
-                    line
+                    line.to_string()
                 };
-                matches.push(format!("{}:{}: {}", rel_path, line_no + 1, truncated));
+                matches.push(format!("{}:{}: {}", rel_path, line_no, truncated));
             }
         }
     }
@@ -410,7 +438,21 @@ fn walk_dir_recursive(
                     }
                 };
                 let path = entry.path();
-                if path.is_dir() {
+                // Path::is_dir()/is_file() turn metadata errors into `false`,
+                // so a listable-but-unsearchable directory (r-- without x)
+                // would silently disappear from the scan. Use a fallible
+                // lookup and record the failure instead (review of #693).
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    // The entry vanished between readdir and stat; that is not
+                    // an incomplete search. Broken symlinks also land here.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        skipped.push(path, format!("could not stat entry: {e}"));
+                        continue;
+                    }
+                };
+                if metadata.is_dir() {
                     if !is_excluded_dir_name(&path)
                         && !walk_dir_recursive(
                             &path,
@@ -423,7 +465,7 @@ fn walk_dir_recursive(
                     {
                         return false;
                     }
-                } else if path.is_file() {
+                } else if metadata.is_file() {
                     result.push(path);
                 }
             }
@@ -694,5 +736,79 @@ mod tests {
         );
         assert!(result.ok);
         assert_eq!(result.output, "No matches found.");
+    }
+
+    #[test]
+    fn non_utf8_lines_are_still_searched_lossily() {
+        // Invalid UTF-8 must not drop the line. OpenCode handles ripgrep's
+        // base64 `bytes` records the same way: match the text, render the bad
+        // bytes as U+FFFD, and do not mark the whole search incomplete.
+        let tmp = tempfile::tempdir().unwrap();
+        let content = b"ERROR \xff\nSERVICE_FAILED\n";
+        std::fs::write(tmp.path().join("latin1.log"), content).unwrap();
+
+        let result = run_grep(
+            &serde_json::json!({
+                "pattern": "ERROR",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        assert!(result.ok);
+        assert!(
+            result.output.contains("latin1.log:1: ERROR \u{FFFD}"),
+            "the invalid byte should be rendered lossily: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("search incomplete"),
+            "invalid UTF-8 alone is not an incomplete search: {}",
+            result.output
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_693_stat_denied_child_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let child = locked.join("error.log");
+        std::fs::write(&child, "SERVICE_FAILED\n").unwrap();
+        // r-- allows listing the directory but denies stat on its children.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        if std::fs::read_dir(&locked).is_err() || std::fs::metadata(&child).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipping: permissions do not deny child metadata in this environment");
+            return;
+        }
+
+        let result = run_grep(
+            &serde_json::json!({
+                "pattern": "SERVICE_FAILED",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.ok);
+        assert!(
+            result
+                .output
+                .contains("No matches found in the files that were checked."),
+            "stat failure must not produce a definitive zero-match result: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("search incomplete")
+                && result.output.contains("locked")
+                && result.output.contains("could not stat entry"),
+            "the skipped child and reason must be reported: {}",
+            result.output
+        );
     }
 }
