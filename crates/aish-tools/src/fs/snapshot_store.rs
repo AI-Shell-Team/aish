@@ -365,10 +365,25 @@ impl SnapshotStore {
         new_content: &str,
         op: SnapshotOp,
     ) -> u64 {
+        let tag = SnapshotTag::from_content(new_content);
+        self.record_mutation_with_tag(path, prior_content, tag, op)
+    }
+
+    /// Record a mutation whose post-edit tag was already computed while the
+    /// new bytes were streamed to disk (line-range edits). `tag` MUST be the
+    /// tag of the complete on-disk file after the mutation — never just the
+    /// replaced window — otherwise the next edit/undo falsely reports drift
+    /// (issue #692).
+    pub fn record_mutation_with_tag(
+        &mut self,
+        path: &Path,
+        prior_content: Option<Vec<u8>>,
+        tag: SnapshotTag,
+        op: SnapshotOp,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let key = normalize_path(path);
-        let tag = SnapshotTag::from_content(new_content);
         let snapshot = FileSnapshot {
             id,
             path: key.clone(),

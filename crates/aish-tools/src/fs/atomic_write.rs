@@ -12,6 +12,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::snapshot_store::{SnapshotTag, StreamingTagHasher};
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -105,21 +107,28 @@ pub fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
 /// head and tail are copied straight from the source file, so only
 /// `middle` is ever materialized. Metadata carry-over, fsync and the
 /// atomic rename match [`atomic_write`].
+///
+/// Returns the snapshot tag of the exact bytes written. The splice streams
+/// the output anyway, so hashing it here avoids a second full read just to
+/// refresh the session's file anchor (issues #692, #696).
 pub fn atomic_write_splice(
     target: &Path,
     before: u64,
     middle: &[u8],
     after: u64,
-) -> std::io::Result<()> {
+) -> std::io::Result<SnapshotTag> {
     let resolved = resolve_write_target(target)?;
     let target = resolved.as_path();
     let tmp = match temp_path(target) {
         Some(p) => p,
-        None => return std::fs::write(target, middle),
+        None => {
+            std::fs::write(target, middle)?;
+            return Ok(SnapshotTag::from_bytes(middle));
+        }
     };
     let prior_meta = existing_metadata(target)?;
 
-    let write_result = (|| -> std::io::Result<()> {
+    let write_result = (|| -> std::io::Result<SnapshotTag> {
         use std::io::{Seek, SeekFrom};
         let mut src = std::fs::File::open(target)?;
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
@@ -127,10 +136,12 @@ pub fn atomic_write_splice(
             apply_metadata(&mut file, meta)?;
         }
 
-        copy_exactly(&mut src, &mut file, before)?;
+        let mut hasher = StreamingTagHasher::new();
+        copy_exactly(&mut src, &mut file, before, &mut hasher)?;
         file.write_all(middle)?;
+        hasher.update(middle);
         src.seek(SeekFrom::Start(after))?;
-        std::io::copy(&mut src, &mut file)?;
+        copy_remaining(&mut src, &mut file, &mut hasher)?;
 
         file.sync_all()?;
         drop(file);
@@ -138,11 +149,11 @@ pub fn atomic_write_splice(
         if let Some(dir) = temp_dir_for(target) {
             let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
         }
-        Ok(())
+        Ok(hasher.finalize())
     })();
 
     match write_result {
-        Ok(()) => Ok(()),
+        Ok(tag) => Ok(tag),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
@@ -151,11 +162,13 @@ pub fn atomic_write_splice(
 }
 
 /// Copy exactly `count` bytes from `src` to `dst` in bounded chunks so the
-/// untouched regions of a huge file never sit in memory.
+/// untouched regions of a huge file never sit in memory. The same bytes are
+/// fed to the tag hasher, so no second pass is needed.
 fn copy_exactly(
     src: &mut std::fs::File,
     dst: &mut std::fs::File,
     count: u64,
+    hasher: &mut StreamingTagHasher,
 ) -> std::io::Result<()> {
     use std::io::Read;
     let mut remaining = count;
@@ -164,9 +177,30 @@ fn copy_exactly(
         let want = std::cmp::min(remaining, chunk.len() as u64) as usize;
         src.read_exact(&mut chunk[..want])?;
         dst.write_all(&chunk[..want])?;
+        hasher.update(&chunk[..want]);
         remaining -= want as u64;
     }
     Ok(())
+}
+
+/// Copy `src` to EOF in bounded chunks, hashing every byte written.
+fn copy_remaining(
+    src: &mut std::fs::File,
+    dst: &mut std::fs::File,
+    hasher: &mut StreamingTagHasher,
+) -> std::io::Result<u64> {
+    use std::io::Read;
+    let mut chunk = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = src.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(total);
+        }
+        dst.write_all(&chunk[..n])?;
+        hasher.update(&chunk[..n]);
+        total += n as u64;
+    }
 }
 
 /// Read the byte range `[start, end)` of `path` into a vector. Bounded by
@@ -744,5 +778,22 @@ mod tests {
         let parent = dir.path().join("parent");
         fs::write(&parent, "x").unwrap();
         assert!(existing_metadata(&parent.join("child")).is_err());
+    }
+
+    #[test]
+    fn splice_returns_tag_of_complete_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("f.txt");
+        fs::write(&target, "alpha\nbeta\ngamma\n").unwrap();
+
+        let tag = atomic_write_splice(&target, 6, b"BETA", 10).unwrap();
+
+        let written = fs::read(&target).unwrap();
+        assert_eq!(written, b"alpha\nBETA\ngamma\n");
+        assert_eq!(
+            tag,
+            SnapshotTag::from_bytes(&written),
+            "the returned tag must describe the whole resulting file"
+        );
     }
 }

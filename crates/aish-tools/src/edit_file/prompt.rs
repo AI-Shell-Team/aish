@@ -38,7 +38,7 @@ pub(crate) fn parameters() -> serde_json::Value {
             },
             "tag": {
                 "type": "string",
-                "description": "Snapshot tag from read_file's [path#TAG] header. Anchors the edit: if the file changed since you read it, the edit is rejected."
+                "description": "Snapshot tag from read_file's [path#TAG] header. Anchors the edit: the edit is rejected if the tag does not match the file's current content or if the file changed since you read it."
             },
             "start_line": {
                 "type": "integer",
