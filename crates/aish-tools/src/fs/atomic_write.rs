@@ -203,6 +203,166 @@ fn copy_remaining(
     }
 }
 
+/// Outcome of a conditional replace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalWriteOutcome {
+    /// The target matched `expected` at commit time and was replaced.
+    Written,
+    /// The target no longer matched `expected`; it was left untouched.
+    Conflict,
+}
+
+/// Atomically replace `target` with `contents`, but only if the target still
+/// contains `expected` at commit time.
+///
+/// On Linux this uses `renameat2(RENAME_EXCHANGE)`: the new content is written
+/// to a sibling temp file, then the two paths are swapped atomically. The
+/// swapped-out entry (the target as it existed at the instant of the swap) is
+/// compared with `expected`. On match the old entry is removed; on mismatch
+/// the swap is reverted, preserving the external change and returning
+/// [`ConditionalWriteOutcome::Conflict`].
+///
+/// This is a commit-time conditional replace, so it does not rely on a
+/// read-then-rename window. On filesystems/targets where `RENAME_EXCHANGE` is
+/// unavailable, it falls back to a best-effort read-compare-write.
+pub fn atomic_write_if_unchanged(
+    target: &Path,
+    expected: &[u8],
+    contents: &[u8],
+) -> std::io::Result<ConditionalWriteOutcome> {
+    #[cfg(target_os = "linux")]
+    {
+        atomic_write_if_unchanged_linux(target, expected, contents)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        atomic_write_if_unchanged_fallback(target, expected, contents)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn atomic_write_if_unchanged_linux(
+    target: &Path,
+    expected: &[u8],
+    contents: &[u8],
+) -> std::io::Result<ConditionalWriteOutcome> {
+    let resolved = resolve_write_target(target)?;
+    let target = resolved.as_path();
+    let tmp = match temp_path(target) {
+        Some(p) => p,
+        None => return atomic_write_if_unchanged_fallback(target, expected, contents),
+    };
+    let prior_meta = existing_metadata(target)?;
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        if let Some(meta) = &prior_meta {
+            apply_metadata(&mut file, meta)?;
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Err(e) = rename_exchange(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        // The filesystem may not implement RENAME_EXCHANGE. Fall back to a
+        // best-effort conditional write rather than failing the edit.
+        if matches!(
+            e.raw_os_error(),
+            Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
+        ) {
+            return atomic_write_if_unchanged_fallback(target, expected, contents);
+        }
+        return Err(e);
+    }
+
+    // The swap put the previous target at `tmp`. Compare exactly the bytes
+    // that were at the target when the exchange committed.
+    let matched = match std::fs::metadata(&tmp) {
+        Ok(meta) if meta.len() == expected.len() as u64 => std::fs::read(&tmp)
+            .map(|old| old == expected)
+            .unwrap_or(false),
+        _ => false,
+    };
+
+    if matched {
+        // Our contents are now at `target`; discard the old entry.
+        let _ = std::fs::remove_file(&tmp);
+        sync_parent_dir(target);
+        return Ok(ConditionalWriteOutcome::Written);
+    }
+
+    // Conflict: put the external content back at `target` and discard our
+    // replacement from the temp path.
+    match rename_exchange(&tmp, target) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&tmp);
+            sync_parent_dir(target);
+            Ok(ConditionalWriteOutcome::Conflict)
+        }
+        Err(e) => {
+            // Leave `tmp` in place: it still holds the external content.
+            Err(e)
+        }
+    }
+}
+
+fn atomic_write_if_unchanged_fallback(
+    target: &Path,
+    expected: &[u8],
+    contents: &[u8],
+) -> std::io::Result<ConditionalWriteOutcome> {
+    let resolved = resolve_write_target(target)?;
+    let target = resolved.as_path();
+    match std::fs::read(target) {
+        Ok(current) if current == expected => {
+            atomic_write(target, contents)?;
+            Ok(ConditionalWriteOutcome::Written)
+        }
+        Ok(_) => Ok(ConditionalWriteOutcome::Conflict),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rename_exchange(left: &Path, right: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let left = CString::new(left.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let right = CString::new(right.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
+
+    // SAFETY: both pointers are valid NUL-terminated strings that outlive the
+    // call; renameat2 has no other preconditions.
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            left.as_ptr(),
+            libc::AT_FDCWD,
+            right.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn sync_parent_dir(target: &Path) {
+    if let Some(dir) = temp_dir_for(target) {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+}
+
 /// Read the byte range `[start, end)` of `path` into a vector. Bounded by
 /// the requested window, never the file size.
 pub fn read_window(path: &Path, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
@@ -795,5 +955,46 @@ mod tests {
             SnapshotTag::from_bytes(&written),
             "the returned tag must describe the whole resulting file"
         );
+    }
+
+    #[test]
+    fn conditional_write_replaces_when_snapshot_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("f.txt");
+        fs::write(&target, "old").unwrap();
+
+        let outcome = atomic_write_if_unchanged(&target, b"old", b"new").unwrap();
+        assert_eq!(outcome, ConditionalWriteOutcome::Written);
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn conditional_write_preserves_external_change_on_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("f.txt");
+        fs::write(&target, "external").unwrap();
+
+        // The caller's snapshot says "old", but the target already changed.
+        let outcome = atomic_write_if_unchanged(&target, b"old", b"new").unwrap();
+        assert_eq!(outcome, ConditionalWriteOutcome::Conflict);
+        assert_eq!(fs::read(&target).unwrap(), b"external");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conditional_write_through_symlink_keeps_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&real, "old").unwrap();
+        std::os::unix::fs::symlink("real.txt", &link).unwrap();
+
+        let outcome = atomic_write_if_unchanged(&link, b"old", b"new").unwrap();
+        assert_eq!(outcome, ConditionalWriteOutcome::Written);
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&real).unwrap(), b"new");
     }
 }
