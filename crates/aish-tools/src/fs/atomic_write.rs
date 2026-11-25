@@ -350,10 +350,15 @@ fn rename_exchange(left: &Path, right: &Path) -> std::io::Result<()> {
     let right = CString::new(right.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
 
+    // Use the raw syscall rather than libc::renameat2: the musl static build
+    // does not export a renameat2 wrapper, so calling the symbol directly
+    // fails to link in the release artifact.
+    //
     // SAFETY: both pointers are valid NUL-terminated strings that outlive the
-    // call; renameat2 has no other preconditions.
+    // call; SYS_renameat2 has no other preconditions.
     let rc = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             left.as_ptr(),
             libc::AT_FDCWD,
