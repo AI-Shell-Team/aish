@@ -9,7 +9,9 @@ Usage:
 - Use regex patterns for content search.
 - When paths are unknown, use glob first to find candidate files, then grep with a tighter scope.
 - Use root to limit the directory being searched.
-- Use include to restrict matches to file names such as *.conf or *.yaml.
+- Use include to restrict matches to file names such as *.conf or app*.log.
+- If a directory cannot be read or a file is too large to scan, the result
+  states that the search was incomplete and lists the skipped paths.
 - Avoid repeating the same pattern across overlapping trees."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
@@ -26,7 +28,7 @@ pub(crate) fn parameters() -> serde_json::Value {
             },
             "include": {
                 "type": "string",
-                "description": "Optional glob filter for file names, e.g. *.py or *.rs."
+                "description": "Optional glob filter for file names, e.g. *.py, app*.log or *.rs."
             }
         },
         "required": ["pattern"]

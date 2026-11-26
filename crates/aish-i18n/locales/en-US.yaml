@@ -1595,6 +1595,7 @@ tools:
       symlink_target: " (symlink target: {target})"
       edit_write_failed: "Failed to write {path}: {error}"
       invalid_tag: "Invalid snapshot tag '{tag}' for {path}"
+      tag_mismatch: "Snapshot tag mismatch for {path}: the provided tag does not match the current file content (expected {expected}) — re-read the file before editing."
       not_undoable_confirm: "Editing {path}: prior content cannot be snapshotted, so this change is NOT undoable (/undo cannot restore it). Continue?"
       stale_tag: "File {path} changed since it was last read — re-read it before editing."
       not_undoable_suffix: " (not undoable: prior content too large)"
@@ -1705,6 +1706,7 @@ tools:
   grep:
     missing_pattern: "Missing 'pattern' parameter"
     invalid_regex: "Error: invalid regex pattern: {error}"
+    invalid_glob: "Error: invalid include glob pattern: {error}"
 
   glob:
     missing_pattern: "Missing 'pattern' parameter"

@@ -70,7 +70,10 @@ pub mod undo_edit {
 pub mod fs {
     mod atomic_write;
     mod snapshot_store;
-    pub use self::atomic_write::{atomic_write, atomic_write_splice, read_window};
+    pub use self::atomic_write::{
+        atomic_write, atomic_write_splice, read_window, SourceFingerprint, SpliceError,
+        SpliceOutput,
+    };
     pub use self::snapshot_store::{
         ApplyError, ApplyOutcome, DriftStatus, FileSnapshot, SharedSnapshotStore, SnapshotOp,
         SnapshotStore, SnapshotTag, StreamingTagHasher, UndoResult,

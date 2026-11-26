@@ -14,7 +14,13 @@ Usage:
 - For large files (>256 KiB), use start_line and end_line to confine the
   replacement to a specific line range — the only way to edit files larger
   than 256 KiB. Lines are 1-based and inclusive.
-  When start_line is given, old_string must match within lines start_line..=end_line only."#;
+  When start_line is given, old_string must match within lines start_line..=end_line only.
+- Concurrent edits: line-range edits are checked for changes up to the final
+  commit check. On Unix this also detects another process renaming a
+  replacement over the target; on other platforms that rename case is
+  best-effort. Full-file edits, and any save that lands after the final check
+  (including during fsync and before the rename), are last-writer-wins.
+  Re-read after a suspected concurrent edit."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({
@@ -38,7 +44,7 @@ pub(crate) fn parameters() -> serde_json::Value {
             },
             "tag": {
                 "type": "string",
-                "description": "Snapshot tag from read_file's [path#TAG] header. Anchors the edit: if the file changed since you read it, the edit is rejected."
+                "description": "Snapshot tag from read_file's [path#TAG] header. Anchors the edit: the edit is rejected if the tag does not match the file's current content or if the file changed since you read it."
             },
             "start_line": {
                 "type": "integer",

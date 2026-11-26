@@ -1594,6 +1594,7 @@ tools:
       symlink_target: "（符号链接目标：{target}）"
       edit_write_failed: "写入 {path} 失败: {error}"
       invalid_tag: "{path} 的快照标签 '{tag}' 无效"
+      tag_mismatch: "文件 {path} 的快照标签不匹配：提供的标签与当前文件内容不一致（应为 {expected}）— 请先重新读取再编辑。"
       not_undoable_confirm: "编辑 {path}：无法为原内容建立快照，此修改不可撤销（/undo 无法恢复）。是否继续？"
       stale_tag: "文件 {path} 自上次读取后已被改动 — 请先重新读取再编辑。"
       not_undoable_suffix: "（不可撤销：原内容过大）"
@@ -1704,6 +1705,7 @@ tools:
   grep:
     missing_pattern: "缺少 'pattern' 参数"
     invalid_regex: "错误：无效的正则表达式: {error}"
+    invalid_glob: "错误：无效的 include glob 模式: {error}"
 
   glob:
     missing_pattern: "缺少 'pattern' 参数"

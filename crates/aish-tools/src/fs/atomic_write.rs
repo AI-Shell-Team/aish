@@ -12,6 +12,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::snapshot_store::{SnapshotTag, StreamingTagHasher};
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -99,55 +101,222 @@ pub fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// Fingerprint of a complete source file used for internal consistency
+/// checks. The 16-bit [`SnapshotTag`] is for display and receipts; this wider
+/// digest prevents a tag collision from hiding a concurrent edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceFingerprint {
+    pub hash: u64,
+    pub len: u64,
+}
+
+impl SourceFingerprint {
+    /// Compute the fingerprint of a complete in-memory file.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let mut hasher = StreamingTagHasher::new();
+        hasher.update(bytes);
+        Self {
+            hash: hasher.finalize_u64(),
+            len: bytes.len() as u64,
+        }
+    }
+}
+
+/// Result of a successful splice.
+#[derive(Debug)]
+pub struct SpliceOutput {
+    /// Tag of the complete new file.
+    pub new_tag: SnapshotTag,
+    /// Complete source file as observed while building the replacement, when
+    /// the caller asked to capture it for rollback.
+    pub prior: Option<Vec<u8>>,
+}
+
+/// Errors from [`atomic_write_splice`].
+#[derive(Debug)]
+pub enum SpliceError {
+    /// The target changed between the caller's scan and the splice read.
+    SourceChanged,
+    /// Underlying I/O error.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for SpliceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpliceError::SourceChanged => f.write_str("source changed during edit"),
+            SpliceError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SpliceError {}
+
+impl From<std::io::Error> for SpliceError {
+    fn from(e: std::io::Error) -> Self {
+        SpliceError::Io(e)
+    }
+}
+
 /// Atomically replace `target` with: original bytes `[0, before)` +
 /// `middle` + original bytes `[after, len)`. Streamed variant of
 /// [`atomic_write`] for line-range edits on very large files. The untouched
 /// head and tail are copied straight from the source file, so only
-/// `middle` is ever materialized. Metadata carry-over, fsync and the
-/// atomic rename match [`atomic_write`].
+/// `middle` is ever materialized.
+///
+/// While copying, the same source handle feeds:
+/// - the complete output tag,
+/// - a 64-bit source fingerprint checked before the rename,
+/// - and, when `prior_limit` is set, the complete prior content for undo.
+///
+/// `original_window` is the source bytes in `[before, after)` that the caller
+/// matched and replaced with `middle`. The live bytes in that range are read
+/// from the same handle and compared with `original_window`, so a writer that
+/// changes the edited line after the caller's window read is detected before
+/// the replacement is published.
+///
+/// Concurrency guarantee: a change observed through the final pre-rename
+/// identity/timestamp check aborts the edit. A save that lands after that
+/// check but before the rename cannot be detected without cross-process
+/// locking or a content CAS, and is last-writer-wins. Undo only contains the
+/// snapshot read by this call.
 pub fn atomic_write_splice(
     target: &Path,
     before: u64,
+    original_window: &[u8],
     middle: &[u8],
     after: u64,
-) -> std::io::Result<()> {
+    expected_source: Option<SourceFingerprint>,
+    prior_limit: Option<usize>,
+) -> Result<SpliceOutput, SpliceError> {
+    atomic_write_splice_with_hook(
+        target,
+        before,
+        original_window,
+        middle,
+        after,
+        expected_source,
+        prior_limit,
+        |_| {},
+    )
+}
+
+/// Internal form with a pre-rename hook. Production passes a no-op closure;
+/// tests use it to inject a concurrent write after the source read.
+fn atomic_write_splice_with_hook<F: FnOnce(&Path)>(
+    target: &Path,
+    before: u64,
+    original_window: &[u8],
+    middle: &[u8],
+    after: u64,
+    expected_source: Option<SourceFingerprint>,
+    prior_limit: Option<usize>,
+    before_rename: F,
+) -> Result<SpliceOutput, SpliceError> {
+    if after < before || after - before != original_window.len() as u64 {
+        return Err(SpliceError::SourceChanged);
+    }
+
     let resolved = resolve_write_target(target)?;
     let target = resolved.as_path();
-    let tmp = match temp_path(target) {
-        Some(p) => p,
-        None => return std::fs::write(target, middle),
+    let Some(tmp) = temp_path(target) else {
+        return Err(SpliceError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cannot create a sibling temp file for this target",
+        )));
     };
     let prior_meta = existing_metadata(target)?;
 
-    let write_result = (|| -> std::io::Result<()> {
-        use std::io::{Seek, SeekFrom};
+    let write_result = (|| -> Result<SpliceOutput, SpliceError> {
         let mut src = std::fs::File::open(target)?;
+        let initial_meta = src.metadata()?;
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         if let Some(meta) = &prior_meta {
             apply_metadata(&mut file, meta)?;
         }
 
-        copy_exactly(&mut src, &mut file, before)?;
+        let mut new_hasher = StreamingTagHasher::new();
+        let mut source_hasher = StreamingTagHasher::new();
+        let mut prior = prior_limit.map(|_| Vec::new());
+
+        copy_exactly(
+            &mut src,
+            &mut file,
+            before,
+            &mut new_hasher,
+            &mut source_hasher,
+            &mut prior,
+            prior_limit,
+        )?;
+        read_live_window(
+            &mut src,
+            original_window,
+            &mut source_hasher,
+            &mut prior,
+            prior_limit,
+        )?;
         file.write_all(middle)?;
-        src.seek(SeekFrom::Start(after))?;
-        std::io::copy(&mut src, &mut file)?;
+        new_hasher.update(middle);
+        let tail_len = copy_remaining(
+            &mut src,
+            &mut file,
+            &mut new_hasher,
+            &mut source_hasher,
+            &mut prior,
+            prior_limit,
+        )?;
+
+        if let Some(expected) = expected_source {
+            let source_len = before + original_window.len() as u64 + tail_len;
+            if source_len != expected.len || source_hasher.finalize_u64() != expected.hash {
+                return Err(SpliceError::SourceChanged);
+            }
+        }
+
+        // Last chance to catch a concurrent save between the source read and
+        // the rename. This is a best-effort guard: a writer that saves after
+        // this check but before the rename cannot be detected without
+        // cross-process CAS/locking, and is last-writer-wins.
+        before_rename(target);
+        if !target_matches_snapshot(&src, &initial_meta, target) {
+            return Err(SpliceError::SourceChanged);
+        }
 
         file.sync_all()?;
         drop(file);
         std::fs::rename(&tmp, target)?;
-        if let Some(dir) = temp_dir_for(target) {
-            let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
-        }
-        Ok(())
+        sync_parent_dir(target);
+        Ok(SpliceOutput {
+            new_tag: new_hasher.finalize(),
+            prior,
+        })
     })();
 
     match write_result {
-        Ok(()) => Ok(()),
-        Err(e) => {
+        Ok(out) => Ok(out),
+        Err(err) => {
+            // Never leave the temp file behind; the target is untouched when
+            // the source check or a write step failed.
             let _ = std::fs::remove_file(&tmp);
-            Err(e)
+            Err(err)
         }
     }
+}
+
+/// Append source bytes to the undo snapshot, aborting if the file grew beyond
+/// the budget the caller reserved.
+fn append_prior(
+    prior: &mut Option<Vec<u8>>,
+    limit: Option<usize>,
+    bytes: &[u8],
+) -> Result<(), SpliceError> {
+    if let (Some(prior), Some(limit)) = (prior.as_mut(), limit) {
+        if prior.len().saturating_add(bytes.len()) > limit {
+            return Err(SpliceError::SourceChanged);
+        }
+        prior.extend_from_slice(bytes);
+    }
+    Ok(())
 }
 
 /// Copy exactly `count` bytes from `src` to `dst` in bounded chunks so the
@@ -156,7 +325,11 @@ fn copy_exactly(
     src: &mut std::fs::File,
     dst: &mut std::fs::File,
     count: u64,
-) -> std::io::Result<()> {
+    new_hasher: &mut StreamingTagHasher,
+    source_hasher: &mut StreamingTagHasher,
+    prior: &mut Option<Vec<u8>>,
+    prior_limit: Option<usize>,
+) -> Result<(), SpliceError> {
     use std::io::Read;
     let mut remaining = count;
     let mut chunk = [0u8; 64 * 1024];
@@ -164,9 +337,113 @@ fn copy_exactly(
         let want = std::cmp::min(remaining, chunk.len() as u64) as usize;
         src.read_exact(&mut chunk[..want])?;
         dst.write_all(&chunk[..want])?;
+        new_hasher.update(&chunk[..want]);
+        source_hasher.update(&chunk[..want]);
+        append_prior(prior, prior_limit, &chunk[..want])?;
         remaining -= want as u64;
     }
     Ok(())
+}
+
+/// Read the live replacement window from the source handle and compare it with
+/// the bytes the caller originally matched. This closes the window between the
+/// caller's `read_window` and this splice.
+fn read_live_window(
+    src: &mut std::fs::File,
+    original_window: &[u8],
+    source_hasher: &mut StreamingTagHasher,
+    prior: &mut Option<Vec<u8>>,
+    prior_limit: Option<usize>,
+) -> Result<(), SpliceError> {
+    use std::io::Read;
+    let mut chunk = [0u8; 64 * 1024];
+    let mut offset = 0usize;
+    while offset < original_window.len() {
+        let want = std::cmp::min(original_window.len() - offset, chunk.len());
+        src.read_exact(&mut chunk[..want])?;
+        let bytes = &chunk[..want];
+        if bytes != &original_window[offset..offset + want] {
+            return Err(SpliceError::SourceChanged);
+        }
+        source_hasher.update(bytes);
+        append_prior(prior, prior_limit, bytes)?;
+        offset += want;
+    }
+    Ok(())
+}
+
+/// Copy `src` to EOF in bounded chunks, feeding the output hash, source hash
+/// and optional prior capture. Returns the number of bytes copied.
+fn copy_remaining(
+    src: &mut std::fs::File,
+    dst: &mut std::fs::File,
+    new_hasher: &mut StreamingTagHasher,
+    source_hasher: &mut StreamingTagHasher,
+    prior: &mut Option<Vec<u8>>,
+    prior_limit: Option<usize>,
+) -> Result<u64, SpliceError> {
+    use std::io::Read;
+    let mut chunk = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = src.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(total);
+        }
+        dst.write_all(&chunk[..n])?;
+        new_hasher.update(&chunk[..n]);
+        source_hasher.update(&chunk[..n]);
+        append_prior(prior, prior_limit, &chunk[..n])?;
+        total += n as u64;
+    }
+}
+
+/// Whether the target still refers to the same inode and timestamp snapshot
+/// captured when the splice source was opened.
+fn target_matches_snapshot(
+    src: &std::fs::File,
+    initial: &std::fs::Metadata,
+    target: &Path,
+) -> bool {
+    let Ok(current) = src.metadata() else {
+        return false;
+    };
+    let Ok(target_meta) = std::fs::metadata(target) else {
+        return false;
+    };
+    metadata_unchanged(initial, &current) && same_file(initial, &target_meta)
+}
+
+#[cfg(unix)]
+fn metadata_unchanged(initial: &std::fs::Metadata, current: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    initial.len() == current.len()
+        && initial.mtime() == current.mtime()
+        && initial.mtime_nsec() == current.mtime_nsec()
+        && initial.ctime() == current.ctime()
+        && initial.ctime_nsec() == current.ctime_nsec()
+}
+
+#[cfg(not(unix))]
+fn metadata_unchanged(initial: &std::fs::Metadata, current: &std::fs::Metadata) -> bool {
+    initial.len() == current.len() && initial.modified().ok() == current.modified().ok()
+}
+
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    true
+}
+
+fn sync_parent_dir(target: &Path) {
+    if let Some(dir) = temp_dir_for(target) {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
 }
 
 /// Read the byte range `[start, end)` of `path` into a vector. Bounded by
@@ -548,7 +825,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("f.txt");
         fs::write(&target, "a\r\nb\r\nc\r\nd\r\n").unwrap();
-        atomic_write_splice(&target, 3, b"B\r\nX", 5).unwrap();
+        atomic_write_splice(&target, 3, b"b\r", b"B\r\nX", 5, None, None).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"a\r\nB\r\nX\nc\r\nd\r\n");
     }
     #[cfg(unix)]
@@ -583,7 +860,7 @@ mod tests {
         std::os::unix::fs::symlink("real.txt", &link).unwrap();
 
         // Replace "b" with "B" through the link.
-        atomic_write_splice(&link, 2, b"B", 3).unwrap();
+        atomic_write_splice(&link, 2, b"b", b"B", 3, None, None).unwrap();
 
         assert!(fs::symlink_metadata(&link)
             .unwrap()
@@ -744,5 +1021,129 @@ mod tests {
         let parent = dir.path().join("parent");
         fs::write(&parent, "x").unwrap();
         assert!(existing_metadata(&parent.join("child")).is_err());
+    }
+
+    #[test]
+    fn splice_returns_complete_tags_and_prior() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("f.txt");
+        let prior = "alpha\nbeta\ngamma\n";
+        fs::write(&target, prior).unwrap();
+
+        let out = atomic_write_splice(
+            &target,
+            6,
+            b"beta",
+            b"BETA",
+            10,
+            Some(SourceFingerprint::from_bytes(prior.as_bytes())),
+            Some(prior.len()),
+        )
+        .unwrap();
+
+        let written = fs::read(&target).unwrap();
+        assert_eq!(written, b"alpha\nBETA\ngamma\n");
+        assert_eq!(
+            out.new_tag,
+            SnapshotTag::from_bytes(&written),
+            "the returned tag must describe the whole resulting file"
+        );
+        assert_eq!(
+            out.prior.as_deref(),
+            Some(prior.as_bytes()),
+            "the captured prior must be the complete source snapshot"
+        );
+    }
+
+    #[test]
+    fn splice_rejects_changed_source_before_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("f.txt");
+        let original = "alpha\nbeta\ngamma\n";
+        fs::write(&target, original).unwrap();
+
+        // Caller scanned a different version of the file.
+        let err = atomic_write_splice(
+            &target,
+            6,
+            b"beta",
+            b"BETA",
+            10,
+            Some(SourceFingerprint::from_bytes(b"alpha\nDRIFTED\ngamma\n")),
+            Some(original.len()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SpliceError::SourceChanged));
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+    }
+
+    #[test]
+    fn splice_rejects_changed_live_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("f.txt");
+        // The caller scanned "a\nb\nc\n" and passes "b" as the matched
+        // window, but another writer has already changed that line to "x".
+        let expected_source = SourceFingerprint::from_bytes(b"a\nb\nc\n");
+        fs::write(&target, "a\nx\nc\n").unwrap();
+
+        let err = atomic_write_splice(&target, 2, b"b", b"B", 3, Some(expected_source), Some(16))
+            .unwrap_err();
+
+        assert!(matches!(err, SpliceError::SourceChanged));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "a\nx\nc\n");
+    }
+
+    #[test]
+    fn splice_enforces_prior_capture_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("f.txt");
+        let content = "a\nb\nc\n";
+        fs::write(&target, content).unwrap();
+
+        // The source fits the expected fingerprint, but the caller reserved
+        // too little room for the undo snapshot. Abort instead of growing the
+        // capture beyond the budget.
+        let err = atomic_write_splice(
+            &target,
+            2,
+            b"b",
+            b"B",
+            3,
+            Some(SourceFingerprint::from_bytes(content.as_bytes())),
+            Some(4),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SpliceError::SourceChanged));
+        assert_eq!(fs::read_to_string(&target).unwrap(), content);
+    }
+
+    #[test]
+    fn splice_detects_write_after_source_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("f.txt");
+        let original = "a\nb\nc\n";
+        fs::write(&target, original).unwrap();
+
+        // Inject a concurrent save after the source bytes were read but
+        // before the rename. The final identity/timestamp guard must reject
+        // the edit and leave the external content intact.
+        let err = atomic_write_splice_with_hook(
+            &target,
+            2,
+            b"b",
+            b"B",
+            3,
+            Some(SourceFingerprint::from_bytes(original.as_bytes())),
+            Some(16),
+            |path| {
+                fs::write(path, "a\nb\nGAMMA\n").unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SpliceError::SourceChanged));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "a\nb\nGAMMA\n");
     }
 }

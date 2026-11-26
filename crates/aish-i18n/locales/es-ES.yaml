@@ -1207,6 +1207,7 @@ tools:
       not_undoable_confirm: "Editar {path}: no se puede crear una instantánea del contenido previo, por lo que este cambio NO es deshacible (/undo no podrá restaurarlo). ¿Continuar?"
       stale_tag: "El archivo {path} cambió desde la última lectura — reléelo antes de editar"
       invalid_tag: "Etiqueta de instantánea '{tag}' no válida para {path}"
+      tag_mismatch: "La etiqueta de instantánea no coincide para {path}: la etiqueta proporcionada no coincide con el contenido actual del archivo (se esperaba {expected}) — vuelve a leer el archivo antes de editar."
       invalid_line_range: "Rango de líneas inválido: start_line={start}, end_line={end}. start_line debe ser >= 1 y end_line >= start_line."
       line_range_out_of_bounds: "El inicio del rango {start} excede la longitud del archivo ({lines} líneas). Use un start_line dentro del archivo."
       not_undoable_suffix: " (no deshacible: el contenido previo es demasiado grande)"

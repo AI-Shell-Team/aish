@@ -1207,6 +1207,7 @@ tools:
       not_undoable_confirm: "Modifier {path} : impossible de sauvegarder le contenu précédent, cette modification est IRREVERSIBLE (/undo ne pourra pas la restaurer). Continuer ?"
       stale_tag: "Le fichier {path} a changé depuis la dernière lecture — relisez-le avant de modifier"
       invalid_tag: "Étiquette d'instantané '{tag}' invalide pour {path}"
+      tag_mismatch: "L'étiquette d'instantané ne correspond pas pour {path} : l'étiquette fournie ne correspond pas au contenu actuel du fichier (attendu {expected}) — relisez le fichier avant de modifier."
       invalid_line_range: "Plage de lignes invalide : start_line={start}, end_line={end}. start_line doit être >= 1 et end_line >= start_line."
       line_range_out_of_bounds: "Le début de plage {start} dépasse la longueur du fichier ({lines} lignes). Utilisez un start_line dans le fichier."
       not_undoable_suffix: " (irréversible : le contenu précédent est trop volumineux)"

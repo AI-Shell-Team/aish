@@ -54,13 +54,30 @@ impl StreamingTagHasher {
         }
     }
 
-    pub fn finalize(self) -> SnapshotTag {
+    fn finished_hash(&self) -> u64 {
         let mut hash = self.hash;
         // Same avalanche finalizer as [`SnapshotTag::from_bytes`].
         hash ^= hash >> 33;
         hash = hash.wrapping_mul(0xff51afd7ed558ccd);
         hash ^= hash >> 33;
-        SnapshotTag(hash as u16)
+        hash
+    }
+
+    /// Finalize into the 4-hex tag shown to the model.
+    pub fn finalize(self) -> SnapshotTag {
+        SnapshotTag(self.finished_hash() as u16)
+    }
+
+    /// Finalize into the full 64-bit digest. Internal consistency checks use
+    /// this wider value so a 16-bit collision cannot hide a concurrent edit.
+    pub fn finalize_u64(self) -> u64 {
+        self.finished_hash()
+    }
+
+    /// Finalize once and return both the full digest and the display tag.
+    pub fn finalize_parts(self) -> (u64, SnapshotTag) {
+        let hash = self.finished_hash();
+        (hash, SnapshotTag(hash as u16))
     }
 }
 impl SnapshotTag {
@@ -365,10 +382,25 @@ impl SnapshotStore {
         new_content: &str,
         op: SnapshotOp,
     ) -> u64 {
+        let tag = SnapshotTag::from_content(new_content);
+        self.record_mutation_with_tag(path, prior_content, tag, op)
+    }
+
+    /// Record a mutation whose post-edit tag was already computed while the
+    /// new bytes were streamed to disk (line-range edits). `tag` MUST be the
+    /// tag of the complete on-disk file after the mutation — never just the
+    /// replaced window — otherwise the next edit/undo falsely reports drift
+    /// (issue #692).
+    pub fn record_mutation_with_tag(
+        &mut self,
+        path: &Path,
+        prior_content: Option<Vec<u8>>,
+        tag: SnapshotTag,
+        op: SnapshotOp,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let key = normalize_path(path);
-        let tag = SnapshotTag::from_content(new_content);
         let snapshot = FileSnapshot {
             id,
             path: key.clone(),

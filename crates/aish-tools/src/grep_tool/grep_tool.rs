@@ -92,10 +92,65 @@ impl Tool for GrepTool {
     }
 }
 
+/// Files larger than this are skipped rather than scanned.
+const MAX_SCAN_FILE_SIZE: u64 = 1_048_576;
+
+/// Cap how many skipped paths are retained in memory. The report below shows
+/// only a prefix of these, but the total count stays exact.
+const MAX_TRACKED_SKIPS: usize = 200;
+
+/// Cap the number of skipped paths listed in the tool output.
+const MAX_REPORTED_SKIPS: usize = 20;
+
 /// Search outcome flags for result wording.
 struct SearchStop {
     cancelled: bool,
     timed_out: bool,
+}
+
+/// Paths that were intentionally or unavoidably not searched, with the
+/// reason. Reporting these is what separates "definitely no match" from
+/// "the search scope was incomplete" (issue #693).
+#[derive(Default)]
+struct SkippedPaths {
+    entries: Vec<(PathBuf, String)>,
+    total: usize,
+}
+
+impl SkippedPaths {
+    fn push(&mut self, path: PathBuf, reason: String) {
+        self.total += 1;
+        if self.entries.len() < MAX_TRACKED_SKIPS {
+            self.entries.push((path, reason));
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+}
+
+/// Render the "search incomplete" note, or `None` when every candidate was
+/// checked.
+fn skipped_note(root: &std::path::Path, skipped: &SkippedPaths) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["(search incomplete — some paths were not checked)".to_string()];
+    let shown = skipped.entries.len().min(MAX_REPORTED_SKIPS);
+    for (path, reason) in skipped.entries.iter().take(shown) {
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        let shown_path = if rel.as_os_str().is_empty() {
+            path.display().to_string()
+        } else {
+            rel.display().to_string()
+        };
+        lines.push(format!("- {shown_path}: {reason}"));
+    }
+    if skipped.total > shown {
+        lines.push(format!("- ... and {} more", skipped.total - shown));
+    }
+    Some(lines.join("\n"))
 }
 
 fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> ToolResult {
@@ -104,7 +159,10 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
         _ => return ToolResult::error(aish_i18n::t("tools.grep.missing_pattern")),
     };
 
-    let re = match regex::Regex::new(pattern_str) {
+    // Match raw bytes, not lossily decoded text. Otherwise a search for the
+    // literal U+FFFD character would also match any invalid UTF-8 byte in the
+    // source file (review of the lossy-decode change).
+    let re = match regex::bytes::Regex::new(pattern_str) {
         Ok(re) => re,
         Err(e) => {
             let mut args_map = std::collections::HashMap::new();
@@ -124,10 +182,24 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
         ));
     }
 
-    let include_glob = args
+    let include_pattern = match args
         .get("include")
         .and_then(|g| g.as_str())
-        .filter(|g| !g.trim().is_empty());
+        .filter(|g| !g.trim().is_empty())
+    {
+        Some(glob_pattern) => match glob::Pattern::new(glob_pattern) {
+            Ok(pattern) => Some(pattern),
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.grep.invalid_glob",
+                    &args_map,
+                ));
+            }
+        },
+        None => None,
+    };
 
     let started = Instant::now();
     let deadline = started + SEARCH_TIMEOUT;
@@ -143,13 +215,18 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
     };
     // The walk itself is cancellable now: a stopped walk lands in the same
     // partial-results path as a stopped scan loop.
-    let files = match walk_files(&root, should_stop.as_ref(), deadline) {
-        Some(f) => f,
-        None => {
-            stop.cancelled = should_stop();
-            stop.timed_out = !stop.cancelled && Instant::now() >= deadline;
-            Vec::new()
-        }
+    let FileWalk {
+        files,
+        skipped,
+        complete,
+    } = walk_files(&root, should_stop.as_ref(), deadline);
+    let mut skipped = skipped;
+    let files = if complete {
+        files
+    } else {
+        stop.cancelled = should_stop();
+        stop.timed_out = !stop.cancelled && Instant::now() >= deadline;
+        Vec::new()
     };
 
     'outer: for (visited, file_path) in files.into_iter().enumerate() {
@@ -163,38 +240,78 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
             break;
         }
 
-        // Apply include filter
-        if let Some(glob_pattern) = include_glob {
+        // Apply include filter. Use the glob crate so a wildcard in the
+        // middle of the pattern (app*.log) matches app-prod.log instead of
+        // falling back to exact-name comparison (issue #695).
+        if let Some(pattern) = &include_pattern {
             let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !glob_match(glob_pattern, file_name) {
+            if !pattern.matches(file_name) {
                 continue;
             }
         }
 
-        // Skip binary / unreadable files
-        let Ok(file) = File::open(&file_path) else {
-            continue;
+        // Unreadable files and files over the scan limit are not searched;
+        // keep their paths so the result can say the scope was incomplete.
+        let file = match File::open(&file_path) {
+            Ok(file) => file,
+            Err(e) => {
+                skipped.push(file_path, format!("could not open file: {e}"));
+                continue;
+            }
         };
-        // Skip large files (>1MB)
-        if file.metadata().map(|m| m.len()).unwrap_or(0) > 1_048_576 {
+        if file.metadata().map(|m| m.len()).unwrap_or(0) > MAX_SCAN_FILE_SIZE {
+            skipped.push(
+                file_path,
+                format!("file exceeds the {MAX_SCAN_FILE_SIZE} byte scan limit"),
+            );
             continue;
         }
 
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
         let rel_path = file_path
             .strip_prefix(&root)
             .unwrap_or(&file_path)
             .display()
             .to_string();
 
-        for (line_no, line_result) in reader.lines().enumerate() {
+        // Read raw bytes per line and decode lossily. `BufRead::lines()`
+        // rejects the whole line on invalid UTF-8, which made a Latin-1 log
+        // containing "ERROR" invisible and produced a false "No matches"
+        // result. Lossy decoding keeps ASCII matches while showing invalid
+        // bytes as U+FFFD, matching OpenCode's ripgrep handling.
+        let mut raw_line = Vec::new();
+        let mut line_no = 0usize;
+        loop {
             if matches.len() >= DEFAULT_MAX_RESULTS {
                 break;
             }
-            let Ok(line) = line_result else {
-                continue;
-            };
-            if re.is_match(&line) {
+            raw_line.clear();
+            match reader.read_until(b'\n', &mut raw_line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    // A real read failure means this file was not fully
+                    // searched; keep the matches collected so far and mark
+                    // the scope incomplete.
+                    skipped.push(file_path, format!("read error: {e}"));
+                    break;
+                }
+            }
+            line_no += 1;
+
+            // Match BufRead::lines() newline stripping.
+            let mut end = raw_line.len();
+            if end > 0 && raw_line[end - 1] == b'\n' {
+                end -= 1;
+                if end > 0 && raw_line[end - 1] == b'\r' {
+                    end -= 1;
+                }
+            }
+            let raw = &raw_line[..end];
+            if re.is_match(raw) {
+                // Decode only for display; matching stays byte-exact.
+                let line = String::from_utf8_lossy(raw);
+                let line = line.as_ref();
                 let truncated = if line.len() > MAX_LINE_LENGTH {
                     let end = line
                         .char_indices()
@@ -204,9 +321,9 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
                         .unwrap_or(0);
                     format!("{}...", &line[..end])
                 } else {
-                    line
+                    line.to_string()
                 };
-                matches.push(format!("{}:{}: {}", rel_path, line_no + 1, truncated));
+                matches.push(format!("{}:{}: {}", rel_path, line_no, truncated));
             }
         }
     }
@@ -228,11 +345,18 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
         None
     };
 
-    if matches.is_empty() && stopped_note.is_none() {
-        return ToolResult::success("No matches found.");
-    }
+    let incomplete_note = skipped_note(&root, &skipped);
     if matches.is_empty() {
-        return ToolResult::success(format!("No matches found.\n{}", stopped_note.unwrap()));
+        let mut output = if incomplete_note.is_some() {
+            "No matches found in the files that were checked.".to_string()
+        } else {
+            "No matches found.".to_string()
+        };
+        for note in [stopped_note, incomplete_note].into_iter().flatten() {
+            output.push('\n');
+            output.push_str(&note);
+        }
+        return ToolResult::success(output);
     }
 
     let truncated = matches.len() >= DEFAULT_MAX_RESULTS;
@@ -240,7 +364,7 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
     if truncated {
         output.push_str("\n(results truncated at 200)");
     }
-    if let Some(note) = stopped_note {
+    for note in [stopped_note, incomplete_note].into_iter().flatten() {
         output.push('\n');
         output.push_str(&note);
     }
@@ -248,40 +372,50 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
     ToolResult::success(output)
 }
 
-/// Simple glob matching for the include filter (supports * wildcard only).
-fn glob_match(pattern: &str, name: &str) -> bool {
-    if let Some(suffix) = pattern.strip_prefix('*') {
-        return name.ends_with(suffix);
-    }
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return name.starts_with(prefix);
-    }
-    pattern == name
+/// Result of a directory walk: candidate files plus any paths that could not
+/// be traversed, and whether the walk itself ran to completion.
+struct FileWalk {
+    files: Vec<PathBuf>,
+    skipped: SkippedPaths,
+    complete: bool,
 }
 
 /// Walk directory tree, collecting file paths (excluding default dirs).
 /// The walk itself is cancellable: `should_stop` is checked per directory
 /// and the deadline bounds slow/unresponsive filesystems (issue #551
 /// review — the previously collected list was built by an uncancellable
-/// traversal). Returns `None` when the walk stopped early.
+/// traversal). Unreadable directories are recorded so the caller never
+/// reports a complete zero-match result for a partial scan (issue #693).
 fn walk_files(
     root: &std::path::Path,
     should_stop: &dyn Fn() -> bool,
     deadline: Instant,
-) -> Option<Vec<PathBuf>> {
-    let mut result = Vec::new();
-    let complete = walk_dir_recursive(root, &mut result, should_stop, deadline, &mut 0);
-    if !complete {
-        return None;
+) -> FileWalk {
+    let mut files = Vec::new();
+    let mut skipped = SkippedPaths::default();
+    let complete = walk_dir_recursive(
+        root,
+        &mut files,
+        &mut skipped,
+        should_stop,
+        deadline,
+        &mut 0,
+    );
+    if complete {
+        files.sort();
     }
-    result.sort();
-    Some(result)
+    FileWalk {
+        files,
+        skipped,
+        complete,
+    }
 }
 
 /// Returns `true` when the walk finished, `false` when stopped early.
 fn walk_dir_recursive(
     dir: &std::path::Path,
     result: &mut Vec<PathBuf>,
+    skipped: &mut SkippedPaths,
     should_stop: &dyn Fn() -> bool,
     deadline: Instant,
     visited_dirs: &mut usize,
@@ -295,19 +429,53 @@ fn walk_dir_recursive(
     {
         return false;
     }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if !is_excluded_dir_name(&path)
-                    && !walk_dir_recursive(&path, result, should_stop, deadline, visited_dirs)
-                {
-                    return false;
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        skipped.push(
+                            dir.to_path_buf(),
+                            format!("could not read directory entry: {e}"),
+                        );
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                // Path::is_dir()/is_file() turn metadata errors into `false`,
+                // so a listable-but-unsearchable directory (r-- without x)
+                // would silently disappear from the scan. Use a fallible
+                // lookup and record the failure instead (review of #693).
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    // The entry vanished between readdir and stat; that is not
+                    // an incomplete search. Broken symlinks also land here.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        skipped.push(path, format!("could not stat entry: {e}"));
+                        continue;
+                    }
+                };
+                if metadata.is_dir() {
+                    if !is_excluded_dir_name(&path)
+                        && !walk_dir_recursive(
+                            &path,
+                            result,
+                            skipped,
+                            should_stop,
+                            deadline,
+                            visited_dirs,
+                        )
+                    {
+                        return false;
+                    }
+                } else if metadata.is_file() {
+                    result.push(path);
                 }
-            } else if path.is_file() {
-                result.push(path);
             }
         }
+        Err(e) => skipped.push(dir.to_path_buf(), format!("could not read directory: {e}")),
     }
     true
 }
@@ -348,12 +516,16 @@ mod tests {
     }
 
     #[test]
-    fn test_glob_match() {
-        assert!(glob_match("*.rs", "main.rs"));
-        assert!(glob_match("*.rs", "lib.rs"));
-        assert!(!glob_match("*.rs", "main.py"));
-        assert!(glob_match("test_*", "test_foo"));
-        assert!(!glob_match("test_*", "prod_foo"));
+    fn test_include_glob_matching() {
+        let patterns = |text: &str| glob::Pattern::new(text).unwrap();
+        assert!(patterns("*.rs").matches("main.rs"));
+        assert!(patterns("*.rs").matches("lib.rs"));
+        assert!(!patterns("*.rs").matches("main.py"));
+        assert!(patterns("test_*").matches("test_foo"));
+        assert!(!patterns("test_*").matches("prod_foo"));
+        // Issue #695: a wildcard in the middle must match across the dash.
+        assert!(patterns("app*.log").matches("app-prod.log"));
+        assert!(!patterns("app*.log").matches("db-prod.log"));
     }
 
     #[test]
@@ -437,6 +609,225 @@ mod tests {
         assert!(
             result.output.contains("cancelled"),
             "out: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn issue_695_include_glob_matches_wildcard_in_the_middle() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("app-prod.log"), "ERROR backend failed\n").unwrap();
+        std::fs::write(tmp.path().join("db-prod.log"), "ERROR db failed\n").unwrap();
+
+        let tool = GrepTool::new();
+        let app = tool.execute(serde_json::json!({
+            "pattern": "ERROR",
+            "root": tmp.path().to_str().unwrap(),
+            "include": "app*.log"
+        }));
+        assert!(app.ok);
+        assert!(
+            app.output.contains("app-prod.log:1: ERROR backend failed"),
+            "app*.log must match app-prod.log, got: {}",
+            app.output
+        );
+        assert!(
+            !app.output.contains("db-prod.log"),
+            "app*.log must not match db-prod.log, got: {}",
+            app.output
+        );
+
+        let all = tool.execute(serde_json::json!({
+            "pattern": "ERROR",
+            "root": tmp.path().to_str().unwrap(),
+            "include": "*.log"
+        }));
+        assert!(all.ok);
+        assert!(all.output.contains("app-prod.log:1:"));
+        assert!(all.output.contains("db-prod.log:1:"));
+    }
+
+    #[test]
+    fn issue_693_large_file_skip_is_reported_with_hits() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("small.log"), "ERROR small\n").unwrap();
+        let big = format!("ERROR skipped\n{}", "x".repeat(MAX_SCAN_FILE_SIZE as usize));
+        std::fs::write(tmp.path().join("big.log"), big).unwrap();
+
+        let result = run_grep(
+            &serde_json::json!({
+                "pattern": "ERROR",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        assert!(result.ok);
+        assert!(
+            result.output.contains("small.log:1: ERROR small"),
+            "matches from checked files must be kept: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("search incomplete"),
+            "skipped file must mark the search incomplete: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("big.log") && result.output.contains("scan limit"),
+            "the skipped file and reason must be named: {}",
+            result.output
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_693_unreadable_directory_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("error.log"), "SERVICE_FAILED\n").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Root bypasses permission bits; skip rather than assert something
+        // the kernel does not enforce for this process.
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipping: running with permission-bypassing privileges");
+            return;
+        }
+
+        let result = run_grep(
+            &serde_json::json!({
+                "pattern": "SERVICE_FAILED",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.ok);
+        assert!(
+            result
+                .output
+                .contains("No matches found in the files that were checked."),
+            "must not claim a complete zero-match scan: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("search incomplete") && result.output.contains("locked"),
+            "the unreadable directory must be named: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("Permission denied") || result.output.contains("os error 13"),
+            "the reason must be preserved: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn issue_693_complete_zero_match_stays_definitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("app.log"), "SERVICE_OK\n").unwrap();
+
+        let result = run_grep(
+            &serde_json::json!({
+                "pattern": "SERVICE_FAILED",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        assert!(result.ok);
+        assert_eq!(result.output, "No matches found.");
+    }
+
+    #[test]
+    fn non_utf8_lines_are_still_searched_lossily() {
+        // Invalid UTF-8 must not drop the line. OpenCode handles ripgrep's
+        // base64 `bytes` records the same way: match the text, render the bad
+        // bytes as U+FFFD, and do not mark the whole search incomplete.
+        let tmp = tempfile::tempdir().unwrap();
+        let content = b"ERROR \xff\nSERVICE_FAILED\n";
+        std::fs::write(tmp.path().join("latin1.log"), content).unwrap();
+
+        let result = run_grep(
+            &serde_json::json!({
+                "pattern": "ERROR",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        assert!(result.ok);
+        assert!(
+            result.output.contains("latin1.log:1: ERROR \u{FFFD}"),
+            "the invalid byte should be rendered lossily: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("search incomplete"),
+            "invalid UTF-8 alone is not an incomplete search: {}",
+            result.output
+        );
+
+        // The literal replacement character must not be synthesized into the
+        // match space: the source contains 0xFF, not U+FFFD.
+        let replacement_char = run_grep(
+            &serde_json::json!({
+                "pattern": "\u{FFFD}",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        assert!(replacement_char.ok);
+        assert_eq!(
+            replacement_char.output, "No matches found.",
+            "literal U+FFFD must only match real U+FFFD bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_693_stat_denied_child_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let child = locked.join("error.log");
+        std::fs::write(&child, "SERVICE_FAILED\n").unwrap();
+        // r-- allows listing the directory but denies stat on its children.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        if std::fs::read_dir(&locked).is_err() || std::fs::metadata(&child).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipping: permissions do not deny child metadata in this environment");
+            return;
+        }
+
+        let result = run_grep(
+            &serde_json::json!({
+                "pattern": "SERVICE_FAILED",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.ok);
+        assert!(
+            result
+                .output
+                .contains("No matches found in the files that were checked."),
+            "stat failure must not produce a definitive zero-match result: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("search incomplete")
+                && result.output.contains("locked")
+                && result.output.contains("could not stat entry"),
+            "the skipped child and reason must be reported: {}",
             result.output
         );
     }

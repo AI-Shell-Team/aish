@@ -50,6 +50,58 @@ impl GlobTool {
     }
 }
 
+/// Cap how many skipped paths are retained in memory. The report below shows
+/// only a prefix of these, but the total count stays exact.
+const MAX_TRACKED_SKIPS: usize = 200;
+
+/// Cap the number of skipped paths listed in the tool output.
+const MAX_REPORTED_SKIPS: usize = 20;
+
+/// Paths that could not be traversed, with the reason. Reporting these keeps
+/// a partial traversal from masquerading as a definitive "no files found"
+/// (issue #693).
+#[derive(Default)]
+struct SkippedPaths {
+    entries: Vec<(PathBuf, String)>,
+    total: usize,
+}
+
+impl SkippedPaths {
+    fn push(&mut self, path: PathBuf, reason: String) {
+        self.total += 1;
+        if self.entries.len() < MAX_TRACKED_SKIPS {
+            self.entries.push((path, reason));
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+}
+
+/// Render the "search incomplete" note, or `None` when the whole tree was
+/// traversed.
+fn skipped_note(root: &Path, skipped: &SkippedPaths) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["(search incomplete — some paths were not checked)".to_string()];
+    let shown = skipped.entries.len().min(MAX_REPORTED_SKIPS);
+    for (path, reason) in skipped.entries.iter().take(shown) {
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        let shown_path = if rel.as_os_str().is_empty() {
+            path.display().to_string()
+        } else {
+            rel.display().to_string()
+        };
+        lines.push(format!("- {shown_path}: {reason}"));
+    }
+    if skipped.total > shown {
+        lines.push(format!("- ... and {} more", skipped.total - shown));
+    }
+    Some(lines.join("\n"))
+}
+
 /// Outcome of a pruned traversal.
 struct WalkOutcome {
     matches: Vec<PathBuf>,
@@ -57,6 +109,8 @@ struct WalkOutcome {
     cancelled: bool,
     /// Traversal hit the wall-clock deadline.
     timed_out: bool,
+    /// Directories/entries that could not be read.
+    skipped: SkippedPaths,
 }
 
 /// Depth-first traversal with directory pruning, early exit and a stop flag.
@@ -87,6 +141,7 @@ fn walk_pattern(
         matches: Vec::with_capacity(limit.min(1024)),
         cancelled: false,
         timed_out: false,
+        skipped: SkippedPaths::default(),
     };
 
     // The start directory itself is never yielded; if it sits inside the
@@ -114,10 +169,22 @@ fn walk_pattern(
         }
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => {
+                out.skipped
+                    .push(dir.clone(), format!("could not read directory: {e}"));
+                continue;
+            }
         };
         let mut seen = 0usize;
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    out.skipped
+                        .push(dir.clone(), format!("could not read directory entry: {e}"));
+                    continue;
+                }
+            };
             seen += 1;
             if seen.is_multiple_of(STOP_CHECK_INTERVAL)
                 && (should_stop() || Instant::now() >= deadline)
@@ -133,7 +200,11 @@ fn walk_pattern(
             let path = entry.path();
             let file_type = match entry.file_type() {
                 Ok(ft) => ft,
-                Err(_) => continue,
+                Err(e) => {
+                    out.skipped
+                        .push(path.clone(), format!("could not stat entry: {e}"));
+                    continue;
+                }
             };
             let file_name = entry.file_name();
             let name_str = file_name.to_string_lossy();
@@ -232,9 +303,15 @@ fn run_glob(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
     // Cancelled walks report their (partial) matches as a normal success
     // with a note, whether or not anything matched: an error result would
     // make the agent retry, and the retry gets cancelled again.
+    let incomplete_note = skipped_note(&start, &outcome.skipped);
+
     if outcome.cancelled {
         let body = if outcome.matches.is_empty() {
-            "No files found.".to_string()
+            if incomplete_note.is_some() {
+                "No files found in the directories that were checked.".to_string()
+            } else {
+                "No files found.".to_string()
+            }
         } else {
             outcome
                 .matches
@@ -243,34 +320,37 @@ fn run_glob(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        return ToolResult::success(format!(
+        let mut text = format!(
             "{body}\n(cancelled after {:.1}s, partial results)",
             started.elapsed().as_secs_f64()
-        ));
+        );
+        if let Some(note) = incomplete_note {
+            text.push('\n');
+            text.push_str(&note);
+        }
+        return ToolResult::success(text);
     }
 
     if outcome.matches.is_empty() {
+        let mut text = if incomplete_note.is_some() {
+            "No files found in the directories that were checked.".to_string()
+        } else {
+            "No files found.".to_string()
+        };
         if outcome.timed_out {
             // Never report a definitive negative result from an incomplete
             // walk — the agent would conclude the files do not exist.
-            return ToolResult::success(format!(
-                "No files found.\n(timed out after {:.0}s — narrow the pattern or root)",
+            text.push_str(&format!(
+                "\n(timed out after {:.0}s — narrow the pattern or root)",
                 TRAVERSAL_TIMEOUT.as_secs()
             ));
         }
-        return ToolResult::success("No files found.");
+        if let Some(note) = incomplete_note {
+            text.push('\n');
+            text.push_str(&note);
+        }
+        return ToolResult::success(text);
     }
-
-    let truncated_note = if outcome.timed_out {
-        format!(
-            "\n(timed out after {:.0}s, partial results — narrow the pattern or root)",
-            TRAVERSAL_TIMEOUT.as_secs()
-        )
-    } else if outcome.matches.len() >= DEFAULT_MAX_RESULTS {
-        "\n(results truncated at 200)".to_string()
-    } else {
-        String::new()
-    };
 
     let mut text: String = outcome
         .matches
@@ -278,7 +358,18 @@ fn run_glob(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    text.push_str(&truncated_note);
+    if outcome.timed_out {
+        text.push_str(&format!(
+            "\n(timed out after {:.0}s, partial results — narrow the pattern or root)",
+            TRAVERSAL_TIMEOUT.as_secs()
+        ));
+    } else if outcome.matches.len() >= DEFAULT_MAX_RESULTS {
+        text.push_str("\n(results truncated at 200)");
+    }
+    if let Some(note) = incomplete_note {
+        text.push('\n');
+        text.push_str(&note);
+    }
     ToolResult::success(text)
 }
 
@@ -496,5 +587,68 @@ mod tests {
             &|| false,
         );
         assert!(outcome.timed_out, "expired deadline must stop the walk");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_693_unreadable_directory_marks_glob_incomplete() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let visible = tmp.path().join("visible");
+        std::fs::create_dir(&visible).unwrap();
+        std::fs::write(visible.join("visible.log"), "ok\n").unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("error.log"), "SERVICE_FAILED\n").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipping: running with permission-bypassing privileges");
+            return;
+        }
+
+        let result = run_glob(
+            &serde_json::json!({
+                "pattern": "**/*.log",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.ok);
+        assert!(
+            result.output.contains("visible.log"),
+            "files from readable directories must still be listed: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("search incomplete") && result.output.contains("locked"),
+            "the unreadable directory must be named: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("Permission denied") || result.output.contains("os error 13"),
+            "the reason must be preserved: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn issue_693_complete_zero_match_stays_definitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("app.txt"), "not a log\n").unwrap();
+
+        let result = run_glob(
+            &serde_json::json!({
+                "pattern": "*.log",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        assert!(result.ok);
+        assert_eq!(result.output, "No files found.");
     }
 }
