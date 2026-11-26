@@ -16,8 +16,9 @@ Usage:
   than 256 KiB. Lines are 1-based and inclusive.
   When start_line is given, old_string must match within lines start_line..=end_line only.
 - Concurrent edits: the edit is rejected if the file changes before the final
-  commit check. A save that lands during the atomic rename itself is
-  last-writer-wins; re-read before retrying after a suspected concurrent edit."#;
+  commit check. A save that lands after the final commit check, including
+  while the edit is fsynced and before the rename, is last-writer-wins;
+  re-read before retrying after a suspected concurrent edit."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({
