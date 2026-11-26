@@ -7,6 +7,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-11-26
+
+### Added
+
+- An account-aware `/model` switcher (#668, closes #592). Picker entries now carry model + account + endpoint, so two accounts on the same base URL are separately selectable; the active entry is badged and every row shows `account · base`. `Enter` still saves the choice as the default, while `s` switches for the current session only without writing `config.yaml`. Session-only switches keep a baseline so later unrelated saves persist the saved default rather than the temporary model, and inline completion follows the switched endpoint and credential. Model-list refreshes show per-endpoint progress, report per-endpoint failures in the panel subtitle instead of hiding a dead endpoint behind a live one, and badge account-configured models that could not be confirmed as `unverified`.
+
+### Changed
+
+- File tools keep large inputs bounded: `read_file` caps memory for a pathological single-line file (#687), `write_file` reads at most the snapshot budget of the prior file before deciding an overwrite is not undoable (#694), the Python tool drains output but retains only its capture budget (#694), `edit_file` scans line ranges without an offset table that grows with the line count (#694), and the inline diff preview reads at most 64 KiB + 1 byte before skipping an oversized or non-UTF-8 preview (#724).
+- `glob` and `grep` now report an incomplete search when directories, files or metadata cannot be read. The result lists the skipped paths and no longer presents a partial scan as a definitive "no files found" / "no matches" (#693). `grep` additionally skips files larger than 1 MiB and lists them as skipped. `grep`'s `include` filter accepts full glob patterns, so a wildcard in the middle such as `app*.log` works (#695).
+- `grep` matches raw bytes and decodes matching lines lossily only for display, so an ASCII pattern in a Latin-1 or otherwise invalid UTF-8 log is found while malformed bytes do not become a literal U+FFFD match.
+- PTY startup allows a loaded host up to 30 seconds for interactive shell rc files before declaring `session_ready` missing, and master writes retry `EINTR`/`EAGAIN` instead of dropping a command when the input queue is briefly full.
+- CI workflows use actions running on Node 24 and pin `ubuntu-26.04` / `ubuntu-26.04-arm`.
+
+### Fixed
+
+- `edit_file` line-range edits are anchored to the content that was scanned, and an explicit `tag` must match the current on-disk content, so a stale or unrelated tag can no longer edit a version the caller never read (#692, #696). The source window and complete-file fingerprint are checked against the live file, and the target identity/timestamp is rechecked immediately before the rename, so a concurrent change is rejected instead of overwritten (#692). Full-file edits keep the documented last-writer-wins behavior for a save that lands after the final check.
+- Undo entries now use the same source snapshot as the edit, and line-range tags describe the complete new file, so an immediate `/undo` or a follow-up edit no longer restores older bytes or reports phantom drift (#692).
+- Atomic writes now resolve symlink chains before replacing, so editing through a symlink updates its destination and keeps the link intact (#688). Extended attributes, including POSIX ACLs, are carried across the replacement, and the edit receipt names the resolved target (#691). The access ACL is captured independently of xattr enumeration, and the write fails closed, leaving the original untouched, when the ACL cannot be restored; file capabilities are intentionally not copied (#691). Only `NotFound` is treated as a new file, so other metadata errors abort the write instead of skipping ACL capture.
+- `read_file` rejects FIFOs, sockets, devices and directories instead of blocking or misreading them (#686), opens the target once with `O_NONBLOCK` and validates the opened descriptor so a path swapped for a FIFO after the check cannot stall the session (#686), and clips oversized lines at a valid UTF-8 boundary so valid multi-byte text does not become a decode error (#682).
+- `write_file`, `edit_file` and `read_file` no longer materialize an entire huge file just to discard it: prior snapshots, line-range scans, single long lines and inline diff previews are bounded (#687, #694, #724).
+- Slash-command and panel popups no longer scroll the screen or leave blank lines on open or dismissal, and resizing or shrinking the terminal no longer erases command output or strands the popup at stale rows (#670).
+
 ## [1.1.0] - 2026-11-17
 
 ### Added
