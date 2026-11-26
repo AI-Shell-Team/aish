@@ -4,7 +4,7 @@ use aish_llm::{PreflightResult, Tool, ToolResult};
 use super::prompt;
 use crate::fs::{
     atomic_write, atomic_write_splice, read_window, SharedSnapshotStore, SnapshotOp, SnapshotTag,
-    SpliceError, SpliceOutput, StreamingTagHasher,
+    SourceFingerprint, SpliceError, SpliceOutput, StreamingTagHasher,
 };
 use std::io::Read;
 use std::path::Path;
@@ -455,7 +455,7 @@ impl EditFileTool {
         // observed before, the streamed content hash must still match the
         // remembered tag; a mismatch means it drifted since the model last
         // saw it, so reject and force a re-read.
-        let disk_tag = hasher.finalize();
+        let (disk_hash, disk_tag) = hasher.finalize_parts();
         if let Some(store) = &self.store {
             let fresh = store
                 .lock()
@@ -481,15 +481,19 @@ impl EditFileTool {
         // files — the prior-content snapshot. That keeps rollback bytes and
         // the post-edit tag on one source version without a second read or a
         // platform-specific compare-and-swap (issue #692 review).
-        let capture_prior = self.store.is_some() && file_len <= SNAPSHOT_MAX_BYTES as u64;
+        let prior_limit = (self.store.is_some() && file_len <= SNAPSHOT_MAX_BYTES as u64)
+            .then_some(SNAPSHOT_MAX_BYTES);
         match atomic_write_splice(
             Path::new(path),
             window_start,
             window.as_bytes(),
             new_window.as_bytes(),
             window_end,
-            Some(disk_tag),
-            capture_prior,
+            Some(SourceFingerprint {
+                hash: disk_hash,
+                len: file_len,
+            }),
+            prior_limit,
         ) {
             Ok(SpliceOutput { new_tag, prior }) => {
                 let tag_suffix = if let Some(store) = &self.store {

@@ -54,13 +54,30 @@ impl StreamingTagHasher {
         }
     }
 
-    pub fn finalize(self) -> SnapshotTag {
+    fn finished_hash(&self) -> u64 {
         let mut hash = self.hash;
         // Same avalanche finalizer as [`SnapshotTag::from_bytes`].
         hash ^= hash >> 33;
         hash = hash.wrapping_mul(0xff51afd7ed558ccd);
         hash ^= hash >> 33;
-        SnapshotTag(hash as u16)
+        hash
+    }
+
+    /// Finalize into the 4-hex tag shown to the model.
+    pub fn finalize(self) -> SnapshotTag {
+        SnapshotTag(self.finished_hash() as u16)
+    }
+
+    /// Finalize into the full 64-bit digest. Internal consistency checks use
+    /// this wider value so a 16-bit collision cannot hide a concurrent edit.
+    pub fn finalize_u64(self) -> u64 {
+        self.finished_hash()
+    }
+
+    /// Finalize once and return both the full digest and the display tag.
+    pub fn finalize_parts(self) -> (u64, SnapshotTag) {
+        let hash = self.finished_hash();
+        (hash, SnapshotTag(hash as u16))
     }
 }
 impl SnapshotTag {
