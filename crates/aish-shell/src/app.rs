@@ -40,6 +40,32 @@ fn format_user_submitted_line(prompt: &str, command: &str) -> String {
     format!("{prompt}{command}")
 }
 
+/// Upper bound on file content retained for the inline diff preview.
+const DIFF_PREVIEW_MAX_BYTES: usize = 64 * 1024;
+
+/// Read a file for the inline diff preview, bounded by
+/// [`DIFF_PREVIEW_MAX_BYTES`].
+///
+/// Reading the whole file before checking its size made `write_file` /
+/// `edit_file` on a huge existing file allocate that file's size in the UI
+/// layer — enough to OOM under a tight memory limit (issue #724). We read at
+/// most one byte past the budget instead; that extra byte is enough to know
+/// the file is too large and skip the preview.
+///
+/// `Ok(None)` means "not previewable" (too large or not valid UTF-8), which
+/// matches the old `read_to_string` failure behavior. `Err` is propagated so
+/// callers can still distinguish `NotFound` (new file) from other failures.
+fn read_diff_preview(path: &Path) -> io::Result<Option<String>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(DIFF_PREVIEW_MAX_BYTES + 1);
+    file.take((DIFF_PREVIEW_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > DIFF_PREVIEW_MAX_BYTES {
+        return Ok(None);
+    }
+    Ok(String::from_utf8(bytes).ok())
+}
+
 fn redact_plan_review_feedback(
     vault: &mut aish_security::secret::SecretVault,
     scanner: &aish_security::secret::SecretScanner,
@@ -2313,11 +2339,9 @@ impl AishShell {
                                 // success / new-file, None on failure or when
                                 // the tool call lacks a path argument.
                                 *file_edit_snapshot_ref.lock() = match path {
-                                    Some(path) => match std::fs::read_to_string(path) {
-                                        Ok(c) if c.len() <= 64 * 1024 => {
-                                            Some((path.to_string(), c))
-                                        }
-                                        Ok(_) => None,
+                                    Some(path) => match read_diff_preview(Path::new(path)) {
+                                        Ok(Some(c)) => Some((path.to_string(), c)),
+                                        Ok(None) => None,
                                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                                             Some((path.to_string(), String::new()))
                                         }
@@ -2497,20 +2521,17 @@ impl AishShell {
                         if end_tool == "write_file" || end_tool == "edit_file" {
                             let diff_snapshot = file_edit_snapshot_ref.lock().take();
                             if let Some((path, old_content)) = diff_snapshot {
-                                if let Ok(new_content) = std::fs::read_to_string(&path) {
-                                    if new_content.len() <= 64 * 1024 {
-                                        let diff =
-                                            theme::render_diff(&old_content, &new_content, 20);
-                                        if !diff.is_empty() {
-                                            let rail = theme::dim(theme::TOOL_BOX_MID);
-                                            let diff_ansi: String = diff
-                                                .lines()
-                                                .map(|l| format!("{}   {}", rail, l))
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
-                                            println!("{}", diff_ansi);
-                                            let _ = io::stdout().flush();
-                                        }
+                                if let Ok(Some(new_content)) = read_diff_preview(Path::new(&path)) {
+                                    let diff = theme::render_diff(&old_content, &new_content, 20);
+                                    if !diff.is_empty() {
+                                        let rail = theme::dim(theme::TOOL_BOX_MID);
+                                        let diff_ansi: String = diff
+                                            .lines()
+                                            .map(|l| format!("{}   {}", rail, l))
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        println!("{}", diff_ansi);
+                                        let _ = io::stdout().flush();
                                     }
                                 }
                             }
@@ -16986,5 +17007,67 @@ mod plan_review_follow_up_tests {
         assert!(redacted_count > 0);
         assert!(!safe_feedback.contains(secret));
         assert!(safe_feedback.contains("$SECRET_"));
+    }
+}
+
+#[cfg(test)]
+mod diff_preview_tests {
+    use super::{read_diff_preview, DIFF_PREVIEW_MAX_BYTES};
+    use std::io::ErrorKind;
+    use std::path::PathBuf;
+
+    fn temp_file(name: &str, bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).expect("write fixture");
+        (dir, path)
+    }
+
+    #[test]
+    fn previews_small_utf8_file() {
+        let (_dir, path) = temp_file("small.txt", b"hello\n");
+        let preview = read_diff_preview(&path).expect("read");
+        assert_eq!(preview.as_deref(), Some("hello\n"));
+    }
+
+    #[test]
+    fn previews_file_exactly_at_budget() {
+        let content = vec![b'a'; DIFF_PREVIEW_MAX_BYTES];
+        let (_dir, path) = temp_file("at-budget.txt", &content);
+        let preview = read_diff_preview(&path).expect("read");
+        assert_eq!(preview.as_ref().map(String::len), Some(content.len()));
+    }
+
+    #[test]
+    fn skips_file_one_byte_over_budget() {
+        // Reading this file must not materialize all of it: one byte past the
+        // budget is enough to treat it as "too large" (#724).
+        let content = vec![b'a'; DIFF_PREVIEW_MAX_BYTES + 1];
+        let (_dir, path) = temp_file("over-budget.txt", &content);
+        let preview = read_diff_preview(&path).expect("read");
+        assert!(preview.is_none());
+    }
+
+    #[test]
+    fn skips_large_file_without_error() {
+        let content = vec![b'A'; 8 * 1024 * 1024];
+        let (_dir, path) = temp_file("large.txt", &content);
+        let preview = read_diff_preview(&path).expect("read");
+        assert!(preview.is_none());
+    }
+
+    #[test]
+    fn skips_invalid_utf8() {
+        let (_dir, path) = temp_file("binary.bin", &[0xff, 0xfe, 0x00]);
+        let preview = read_diff_preview(&path).expect("read");
+        assert!(preview.is_none());
+    }
+
+    #[test]
+    fn reports_not_found_for_new_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("missing.txt");
+        let err = read_diff_preview(&path).expect_err("missing file");
+        assert_eq!(err.kind(), ErrorKind::NotFound);
     }
 }
