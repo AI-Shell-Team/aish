@@ -7902,15 +7902,34 @@ mod tests {
         path.exists()
     }
 
-    /// Run a no-op command to wait until the shell has processed everything
-    /// queued by the cancelled command. Without this, a cancellation that
-    /// failed to stop its tail leaves later commands queued, so the next
-    /// attempt's start marker can appear late and look like a startup failure.
-    fn drain_cancelled_shell(pty: &mut PersistentPty) {
-        let (output, exit_code, _) = pty
-            .execute_command(":", Duration::from_secs(30), None, false)
-            .expect("drain command");
-        assert_eq!(exit_code, 0, "drain command failed: {output:?}");
+    /// Run a no-op command until the shell has recovered from the cancelled
+    /// command and processed everything queued behind it.
+    ///
+    /// [`PersistentPty::execute_command`] returns as soon as it observes the
+    /// cancel token, which can be before bash has finished unwinding the
+    /// aborted `source`. A command sent in that window can be aborted by the
+    /// lingering cancellation state and return `-1`; retry until the shell is
+    /// back at a prompt. A dead shell fails immediately with diagnostics.
+    fn drain_cancelled_shell(pty: &mut PersistentPty, attempt: usize) {
+        const DRAIN_DEADLINE: Duration = Duration::from_secs(45);
+        const DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
+
+        let deadline = Instant::now() + DRAIN_DEADLINE;
+        let last_failure = loop {
+            let failure = match pty.execute_command(":", DRAIN_ATTEMPT_TIMEOUT, None, false) {
+                Ok((_, 0, _)) => return,
+                Ok((output, exit_code, _)) => format!("exit {exit_code}: {output:?}"),
+                Err(err) => format!("error: {err}"),
+            };
+            if Instant::now() >= deadline || !pty.running.load(Ordering::SeqCst) {
+                break failure;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        panic!(
+            "attempt {attempt}: drain command never succeeded (shell_running={}): {last_failure}",
+            pty.running.load(Ordering::SeqCst)
+        );
     }
 
     #[test]
@@ -9283,7 +9302,7 @@ mod tests {
             );
             // Let a tail that survived cancellation run (and finish) before
             // the next attempt, so queued work cannot delay its start marker.
-            drain_cancelled_shell(&mut pty);
+            drain_cancelled_shell(&mut pty, attempt);
             if marker.exists() {
                 first_unexpected_output = Some(output);
                 break;
@@ -9352,7 +9371,7 @@ mod tests {
                 exit_code, -1,
                 "cancelled command returned {exit_code}: {output:?}"
             );
-            drain_cancelled_shell(&mut pty);
+            drain_cancelled_shell(&mut pty, attempt);
         }
 
         let (output, exit_code, _) = pty
@@ -9411,6 +9430,7 @@ mod tests {
         // Drain before checking the tail: a cancellation that failed to stop
         // the `sleep` must be caught here, not after the test has already
         // returned from the follow-up command.
+        drain_cancelled_shell(&mut pty, 0);
         let (output, exit_code, _) = pty
             .execute_command("printf session_ok", Duration::from_secs(30), None, false)
             .expect("follow-up command");
