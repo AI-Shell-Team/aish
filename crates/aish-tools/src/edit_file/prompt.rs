@@ -15,10 +15,12 @@ Usage:
   replacement to a specific line range — the only way to edit files larger
   than 256 KiB. Lines are 1-based and inclusive.
   When start_line is given, old_string must match within lines start_line..=end_line only.
-- Concurrent edits: the edit is rejected if the file changes before the final
-  commit check. A save that lands after the final commit check, including
-  while the edit is fsynced and before the rename, is last-writer-wins;
-  re-read before retrying after a suspected concurrent edit."#;
+- Concurrent edits: line-range edits are checked for changes up to the final
+  commit check. On Unix this also detects another process renaming a
+  replacement over the target; on other platforms that rename case is
+  best-effort. Full-file edits, and any save that lands after the final check
+  (including during fsync and before the rename), are last-writer-wins.
+  Re-read after a suspected concurrent edit."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({
