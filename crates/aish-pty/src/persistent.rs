@@ -936,7 +936,13 @@ impl PersistentPty {
         // Wait for session_ready event.  Also returns whether the
         // initial PromptReady was seen in the same control-pipe read
         // (common case: both arrive together).
-        let saw_prompt = pty.wait_for_session_ready(Duration::from_secs(5))?;
+        //
+        // This is a startup budget, not a command timeout: interactive bash
+        // sources the user's rc files before emitting session_ready, and a
+        // loaded CI runner (or a slow $HOME) can easily take more than a few
+        // seconds.  Keep a generous bound so a slow host does not look like a
+        // broken shell.
+        let saw_prompt = pty.wait_for_session_ready(Duration::from_secs(30))?;
 
         // Consume the initial PromptReady if it wasn't already seen
         // during session_ready.  Use a short timeout — bash emits it
