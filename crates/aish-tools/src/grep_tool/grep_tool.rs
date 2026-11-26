@@ -159,7 +159,10 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
         _ => return ToolResult::error(aish_i18n::t("tools.grep.missing_pattern")),
     };
 
-    let re = match regex::Regex::new(pattern_str) {
+    // Match raw bytes, not lossily decoded text. Otherwise a search for the
+    // literal U+FFFD character would also match any invalid UTF-8 byte in the
+    // source file (review of the lossy-decode change).
+    let re = match regex::bytes::Regex::new(pattern_str) {
         Ok(re) => re,
         Err(e) => {
             let mut args_map = std::collections::HashMap::new();
@@ -304,8 +307,10 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
                     end -= 1;
                 }
             }
-            let line = String::from_utf8_lossy(&raw_line[..end]);
-            if re.is_match(&line) {
+            let raw = &raw_line[..end];
+            if re.is_match(raw) {
+                // Decode only for display; matching stays byte-exact.
+                let line = String::from_utf8_lossy(raw);
                 let line = line.as_ref();
                 let truncated = if line.len() > MAX_LINE_LENGTH {
                     let end = line
@@ -764,6 +769,21 @@ mod tests {
             !result.output.contains("search incomplete"),
             "invalid UTF-8 alone is not an incomplete search: {}",
             result.output
+        );
+
+        // The literal replacement character must not be synthesized into the
+        // match space: the source contains 0xFF, not U+FFFD.
+        let replacement_char = run_grep(
+            &serde_json::json!({
+                "pattern": "\u{FFFD}",
+                "root": tmp.path().to_str().unwrap()
+            }),
+            None,
+        );
+        assert!(replacement_char.ok);
+        assert_eq!(
+            replacement_char.output, "No matches found.",
+            "literal U+FFFD must only match real U+FFFD bytes"
         );
     }
 

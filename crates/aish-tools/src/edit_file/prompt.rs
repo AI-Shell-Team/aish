@@ -14,7 +14,10 @@ Usage:
 - For large files (>256 KiB), use start_line and end_line to confine the
   replacement to a specific line range — the only way to edit files larger
   than 256 KiB. Lines are 1-based and inclusive.
-  When start_line is given, old_string must match within lines start_line..=end_line only."#;
+  When start_line is given, old_string must match within lines start_line..=end_line only.
+- Concurrent edits: the edit is rejected if the file changes before the final
+  commit check. A save that lands during the atomic rename itself is
+  last-writer-wins; re-read before retrying after a suspected concurrent edit."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({

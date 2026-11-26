@@ -174,6 +174,12 @@ impl From<std::io::Error> for SpliceError {
 /// from the same handle and compared with `original_window`, so a writer that
 /// changes the edited line after the caller's window read is detected before
 /// the replacement is published.
+///
+/// Concurrency guarantee: a change observed through the final pre-rename
+/// identity/timestamp check aborts the edit. A save that lands after that
+/// check but before the rename cannot be detected without cross-process
+/// locking or a content CAS, and is last-writer-wins. Undo only contains the
+/// snapshot read by this call.
 pub fn atomic_write_splice(
     target: &Path,
     before: u64,
@@ -182,6 +188,30 @@ pub fn atomic_write_splice(
     after: u64,
     expected_source: Option<SourceFingerprint>,
     prior_limit: Option<usize>,
+) -> Result<SpliceOutput, SpliceError> {
+    atomic_write_splice_with_hook(
+        target,
+        before,
+        original_window,
+        middle,
+        after,
+        expected_source,
+        prior_limit,
+        |_| {},
+    )
+}
+
+/// Internal form with a pre-rename hook. Production passes a no-op closure;
+/// tests use it to inject a concurrent write after the source read.
+fn atomic_write_splice_with_hook<F: FnOnce(&Path)>(
+    target: &Path,
+    before: u64,
+    original_window: &[u8],
+    middle: &[u8],
+    after: u64,
+    expected_source: Option<SourceFingerprint>,
+    prior_limit: Option<usize>,
+    before_rename: F,
 ) -> Result<SpliceOutput, SpliceError> {
     if after < before || after - before != original_window.len() as u64 {
         return Err(SpliceError::SourceChanged);
@@ -199,6 +229,7 @@ pub fn atomic_write_splice(
 
     let write_result = (|| -> Result<SpliceOutput, SpliceError> {
         let mut src = std::fs::File::open(target)?;
+        let initial_meta = src.metadata()?;
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         if let Some(meta) = &prior_meta {
             apply_metadata(&mut file, meta)?;
@@ -240,6 +271,15 @@ pub fn atomic_write_splice(
             if source_len != expected.len || source_hasher.finalize_u64() != expected.hash {
                 return Err(SpliceError::SourceChanged);
             }
+        }
+
+        // Last chance to catch a concurrent save between the source read and
+        // the rename. This is a best-effort guard: a writer that saves after
+        // this check but before the rename cannot be detected without
+        // cross-process CAS/locking, and is last-writer-wins.
+        before_rename(target);
+        if !target_matches_snapshot(&src, &initial_meta, target) {
+            return Err(SpliceError::SourceChanged);
         }
 
         file.sync_all()?;
@@ -356,6 +396,48 @@ fn copy_remaining(
         append_prior(prior, prior_limit, &chunk[..n])?;
         total += n as u64;
     }
+}
+
+/// Whether the target still refers to the same inode and timestamp snapshot
+/// captured when the splice source was opened.
+fn target_matches_snapshot(
+    src: &std::fs::File,
+    initial: &std::fs::Metadata,
+    target: &Path,
+) -> bool {
+    let Ok(current) = src.metadata() else {
+        return false;
+    };
+    let Ok(target_meta) = std::fs::metadata(target) else {
+        return false;
+    };
+    metadata_unchanged(initial, &current) && same_file(initial, &target_meta)
+}
+
+#[cfg(unix)]
+fn metadata_unchanged(initial: &std::fs::Metadata, current: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    initial.len() == current.len()
+        && initial.mtime() == current.mtime()
+        && initial.mtime_nsec() == current.mtime_nsec()
+        && initial.ctime() == current.ctime()
+        && initial.ctime_nsec() == current.ctime_nsec()
+}
+
+#[cfg(not(unix))]
+fn metadata_unchanged(initial: &std::fs::Metadata, current: &std::fs::Metadata) -> bool {
+    initial.len() == current.len() && initial.modified().ok() == current.modified().ok()
+}
+
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    true
 }
 
 fn sync_parent_dir(target: &Path) {
@@ -1035,5 +1117,33 @@ mod tests {
 
         assert!(matches!(err, SpliceError::SourceChanged));
         assert_eq!(fs::read_to_string(&target).unwrap(), content);
+    }
+
+    #[test]
+    fn splice_detects_write_after_source_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("f.txt");
+        let original = "a\nb\nc\n";
+        fs::write(&target, original).unwrap();
+
+        // Inject a concurrent save after the source bytes were read but
+        // before the rename. The final identity/timestamp guard must reject
+        // the edit and leave the external content intact.
+        let err = atomic_write_splice_with_hook(
+            &target,
+            2,
+            b"b",
+            b"B",
+            3,
+            Some(SourceFingerprint::from_bytes(original.as_bytes())),
+            Some(16),
+            |path| {
+                fs::write(path, "a\nb\nGAMMA\n").unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SpliceError::SourceChanged));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "a\nb\nGAMMA\n");
     }
 }
