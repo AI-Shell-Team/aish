@@ -19,8 +19,9 @@ pub struct ProviderInfo {
 pub fn detect_provider_from_model(model: &str) -> ProviderInfo {
     let model_lower = model.to_lowercase();
 
-    let (id, display) = if model_lower.starts_with("claude") || model_lower.starts_with("anthropic")
-    {
+    let (id, display) = if model_lower.starts_with("opencode-go/") {
+        ("opencode-go", "OpenCode Go")
+    } else if model_lower.starts_with("claude") || model_lower.starts_with("anthropic") {
         ("anthropic", "Anthropic")
     } else if model_lower.starts_with("gpt")
         || model_lower.starts_with("o1")
@@ -71,7 +72,10 @@ pub fn detect_provider_from_model(model: &str) -> ProviderInfo {
 pub fn refine_provider_from_api_base(provider: &mut ProviderInfo, api_base: &str) {
     let base_lower = api_base.to_lowercase();
 
-    if base_lower.contains("anthropic.com") {
+    if base_lower.contains("opencode.ai/inference/go") {
+        provider.id = "opencode-go".into();
+        provider.display_name = "OpenCode Go".into();
+    } else if base_lower.contains("anthropic.com") {
         provider.id = "anthropic".into();
         provider.display_name = "Anthropic".into();
     } else if base_lower.contains("openai.com") && !base_lower.contains("codex") {
@@ -162,6 +166,7 @@ fn dashboard_url_for(provider_id: &str) -> Option<String> {
         "deepseek" => Some("https://platform.deepseek.com/usage".into()),
         "mistral" => Some("https://console.mistral.ai/".into()),
         "openai-codex" => Some("https://codex.ai/".into()),
+        "opencode-go" => Some("https://opencode.ai/".into()),
         "xai" => Some("https://console.x.ai/".into()),
         "moonshot" => Some("https://platform.moonshot.ai/console/api-keys".into()),
         "minimax" => {
@@ -183,7 +188,7 @@ fn supports_tools_for(provider_id: &str) -> bool {
     match provider_id {
         "openai" | "anthropic" | "google" | "deepseek" | "mistral" | "ollama" | "xai"
         | "moonshot" | "minimax" | "openrouter" | "together" | "zhipu" | "zai" | "qwen"
-        | "qianfan" | "vllm" => true,
+        | "qianfan" | "vllm" | "opencode-go" => true,
         _ => false,
     }
 }
@@ -290,6 +295,20 @@ mod tests {
         // Model says Anthropic, empty API base — model wins
         let p2 = detect_provider("claude-3-opus", "");
         assert_eq!(p2.id, "anthropic");
+    }
+
+    #[test]
+    fn test_opencode_go_detection() {
+        let p = detect_provider_from_model("opencode-go/kimi-k3");
+        assert_eq!(p.id, "opencode-go");
+        assert_eq!(p.display_name, "OpenCode Go");
+        assert!(p.supports_tools);
+
+        let p2 = detect_provider("kimi-k3", "https://opencode.ai/inference/go/openai/v1");
+        assert_eq!(p2.id, "opencode-go");
+
+        let p3 = detect_provider("kimi-k3", "https://opencode.ai/inference/v1");
+        assert_ne!(p3.id, "opencode-go");
     }
 
     #[test]

@@ -15,7 +15,8 @@ pub async fn stream(
     temperature: Option<f64>,
     max_tokens: Option<u32>,
 ) -> Result<LlmResponse, AishError> {
-    let mut client = LlmClient::new(&ctx.api_base, &ctx.api_key, &ctx.model);
+    let mut client = LlmClient::new(&ctx.api_base, &ctx.api_key, &ctx.model)
+        .with_opencode_session_id(ctx.opencode_session_id.clone());
     if ctx.close_connection {
         client = client.with_close_connection();
     }
@@ -25,6 +26,7 @@ pub async fn stream(
 }
 
 pub async fn test_openai_completions_connection(ctx: &StreamContext) -> Result<(), String> {
-    let client = LlmClient::new(&ctx.api_base, &ctx.api_key, &ctx.model);
+    let client = LlmClient::new(&ctx.api_base, &ctx.api_key, &ctx.model)
+        .with_opencode_session_id(ctx.opencode_session_id.clone());
     client.test_connection().await
 }

@@ -483,6 +483,34 @@ temperature: 0.7
 # 而不带该字段时 provider 会按模型自身上限决定，不会越界。
 ```
 
+### OpenCode Go 配置示例
+
+OpenCode Go 是 OpenAI 兼容网关，但要求每个会话发送稳定的
+`x-opencode-session` 请求头。通过 `opencode-go` provider 或直接配置
+`api_base` 即可让 aish 自动注入该请求头和自有 `User-Agent`：
+
+```yaml
+model: opencode-go/kimi-k3
+api_base: https://opencode.ai/inference/go/openai/v1
+api_key: oc_sk_your-key-here
+```
+
+说明：
+
+- **Go / Go Plus / Go Teams 共用同一个 provider**：三者都使用
+  `https://opencode.ai/inference/go` 和 `x-opencode-session`，套餐只影响
+  用量上限，不影响请求协议。
+- 密钥类型：Go / Go Plus 可用订阅者个人 API key 或 service account key；
+  Go Teams 需使用成员的个人 API key（service account 不被 Teams 覆盖）。
+- Pay-as-you-go Console 使用 `https://opencode.ai/inference`（不带 `/go`），
+  不需要 session 头，可按普通 OpenAI 兼容端点配置。
+- 模型名建议使用 `opencode-go/<model-id>` 形式；HTTP 请求会自动去掉
+  `opencode-go/` 前缀。
+- aish 会复用当前 shell 会话的 UUID 作为 `x-opencode-session`，从而稳定
+  路由并复用 prompt cache。
+- 如果手工配置 `custom` provider，请使用上面的 `api_base`，请求头会按
+  endpoint 自动注入。
+
 ### 其他兼容 OpenAI API 的服务
 
 ```yaml

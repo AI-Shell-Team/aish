@@ -1619,6 +1619,9 @@ impl AishShell {
         } else {
             uuid::Uuid::new_v4().to_string()
         };
+        // OpenCode Go routes requests by conversation; reuse the persisted
+        // session UUID so prompt caching stays stable across turns.
+        llm_session.set_opencode_session_id(format!("ses_{session_uuid}"));
         let audit_host = sysinfo::System::host_name();
         // Initialize shared memory manager (best-effort)
         let memory_manager: SharedMemoryManager = Arc::new(Mutex::new(
@@ -3076,11 +3079,14 @@ impl AishShell {
                 tracing::info!("inline_completion enabled but no api_key configured; skipping");
                 None
             } else {
-                let llm_client = Arc::new(aish_llm::LlmClient::new(
-                    &self.config.api_base,
-                    &self.config.api_key,
-                    &self.config.model,
-                ));
+                let llm_client = Arc::new(
+                    aish_llm::LlmClient::new(
+                        &self.config.api_base,
+                        &self.config.api_key,
+                        &self.config.model,
+                    )
+                    .with_opencode_session_id(Some(format!("ses_{}", self.session_uuid))),
+                );
                 let provider = crate::inline_completion::build_default_provider(
                     llm_client,
                     cfg.disable_thinking,

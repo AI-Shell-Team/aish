@@ -517,11 +517,15 @@ pub fn check_connectivity(
         "messages": [{"role": "user", "content": "Hi"}],
     });
 
+    // OpenCode Go requires x-opencode-session on chat requests.
+    let provider_headers = aish_llm::providers::opencode_go::provider_headers(api_base, None);
+
     let start = std::time::Instant::now();
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
+        .headers(provider_headers)
         .json(&body)
         .send();
 

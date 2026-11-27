@@ -82,6 +82,27 @@ pub fn fetch_models_from_api(
     api_key: &str,
     timeout_s: u64,
 ) -> Result<Vec<String>, String> {
+    fetch_models_from_api_impl(api_base, api_key, timeout_s, None)
+}
+
+/// Fetch only chat models from OpenCode Go's `/models` endpoint.
+///
+/// The gateway also lists `decision` and `embedding` models; those are not
+/// usable as coding-agent chat models and would only clutter the picker.
+pub fn fetch_opencode_go_models(
+    api_base: &str,
+    api_key: &str,
+    timeout_s: u64,
+) -> Result<Vec<String>, String> {
+    fetch_models_from_api_impl(api_base, api_key, timeout_s, Some("chat"))
+}
+
+fn fetch_models_from_api_impl(
+    api_base: &str,
+    api_key: &str,
+    timeout_s: u64,
+    model_type: Option<&str>,
+) -> Result<Vec<String>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_s))
         .build()
@@ -136,6 +157,13 @@ pub fn fetch_models_from_api(
         // Extract model IDs from data[].id
         if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
             for entry in data {
+                if let Some(expected) = model_type {
+                    if let Some(actual) = entry.get("type").and_then(|v| v.as_str()) {
+                        if !actual.eq_ignore_ascii_case(expected) {
+                            continue;
+                        }
+                    }
+                }
                 if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
                     all_models.push(trim_model_name(id));
                 }
@@ -222,6 +250,20 @@ pub fn get_models_for_provider(
 ) -> ModelCatalog {
     if !uses_live_discovery(provider_key) {
         return ModelCatalog::local(get_provider_models(provider_key));
+    }
+
+    if provider_key == "opencode-go" {
+        return match fetch_opencode_go_models(
+            api_base,
+            api_key.unwrap_or(""),
+            DEFAULT_FETCH_TIMEOUT_S,
+        ) {
+            Ok(models) => ModelCatalog::discovered(models),
+            Err(e) => {
+                debug!("OpenCode Go discovery failed: {}", e);
+                ModelCatalog::discover_failed(e)
+            }
+        };
     }
 
     if provider_key == "ollama" {

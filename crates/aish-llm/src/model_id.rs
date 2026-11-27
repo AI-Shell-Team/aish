@@ -16,6 +16,15 @@ pub fn normalize_model_for_provider(provider_key: &str, model: &str) -> String {
         return String::new();
     }
 
+    // OpenCode Go models are stored as `opencode-go/<model-id>`; the HTTP
+    // layer strips the prefix again (see `resolve_model_for_api`).
+    if provider_key == "opencode-go" {
+        if trimmed.to_ascii_lowercase().starts_with("opencode-go/") {
+            return trimmed.to_string();
+        }
+        return format!("opencode-go/{trimmed}");
+    }
+
     if trimmed.contains('/') {
         if provider_key == "openai" {
             return strip_first_provider_segment(trimmed);
@@ -40,6 +49,9 @@ pub fn resolve_model_for_api(model: &str, api_base: &str) -> String {
     }
 
     let base_lower = api_base.to_lowercase();
+    if base_lower.contains("opencode.ai/inference/go") {
+        return strip_first_provider_segment(trimmed);
+    }
     if base_lower.contains("api.openai.com") {
         return strip_first_provider_segment(trimmed);
     }
@@ -145,6 +157,42 @@ mod tests {
         assert_eq!(
             resolve_model_for_api("provider/model-name", "https://gateway.example.com/v1"),
             "provider/model-name"
+        );
+    }
+
+    #[test]
+    fn test_normalize_opencode_go_prefixes_bare_model() {
+        assert_eq!(
+            normalize_model_for_provider("opencode-go", "kimi-k3"),
+            "opencode-go/kimi-k3"
+        );
+    }
+
+    #[test]
+    fn test_normalize_opencode_go_keeps_existing_prefix() {
+        assert_eq!(
+            normalize_model_for_provider("opencode-go", "opencode-go/gpt-5.6-luna"),
+            "opencode-go/gpt-5.6-luna"
+        );
+    }
+
+    #[test]
+    fn test_resolve_opencode_go_strips_prefix() {
+        assert_eq!(
+            resolve_model_for_api(
+                "opencode-go/kimi-k3",
+                "https://opencode.ai/inference/go/openai/v1"
+            ),
+            "kimi-k3"
+        );
+        assert_eq!(
+            resolve_model_for_api("kimi-k3", "https://opencode.ai/inference/go/openai/v1"),
+            "kimi-k3"
+        );
+        // Pay-as-you-go base keeps the model name untouched.
+        assert_eq!(
+            resolve_model_for_api("kimi-k3", "https://opencode.ai/inference/v1"),
+            "kimi-k3"
         );
     }
 }
