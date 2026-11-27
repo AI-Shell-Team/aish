@@ -497,6 +497,13 @@ api_key: oc_sk_your-key-here
 
 说明：
 
+- **Go / Go Plus / Go Teams 共用同一个 provider**：三者都使用
+  `https://opencode.ai/inference/go` 和 `x-opencode-session`，套餐只影响
+  用量上限，不影响请求协议。
+- 密钥类型：Go / Go Plus 可用订阅者个人 API key 或 service account key；
+  Go Teams 需使用成员的个人 API key（service account 不被 Teams 覆盖）。
+- Pay-as-you-go Console 使用 `https://opencode.ai/inference`（不带 `/go`），
+  不需要 session 头，可按普通 OpenAI 兼容端点配置。
 - 模型名建议使用 `opencode-go/<model-id>` 形式；HTTP 请求会自动去掉
   `opencode-go/` 前缀。
 - aish 会复用当前 shell 会话的 UUID 作为 `x-opencode-session`，从而稳定

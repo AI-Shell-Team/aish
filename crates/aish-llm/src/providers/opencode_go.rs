@@ -4,6 +4,13 @@
 //! `Authorization` header it requires a stable `x-opencode-session` header
 //! (and asks clients to identify themselves with their own `User-Agent`).
 //!
+//! This covers all Go-family plans: **Go**, **Go Plus** and **Go Teams** all
+//! share the same `/inference/go` base URL and the same session-header
+//! requirement. The plan only changes usage limits and which key types are
+//! accepted (Go / Go Plus: personal or service-account key; Go Teams: a
+//! member's personal key). Pay-as-you-go Console uses `/inference` (no `/go`)
+//! and does not need the session header.
+//!
 //! Official docs: <https://opencode.ai/docs/go/>
 //! Harness setup:  <https://opencode.ai/docs/console/harnesses/>
 
@@ -83,8 +90,9 @@ pub fn error_hint(_status: reqwest::StatusCode, body: &str) -> Option<String> {
     }
     if lower.contains("entitlementerror") || lower.contains("subscription required") {
         return Some(
-            "This workspace has no active OpenCode Go subscription. \
-             Subscribe to Go or switch to the pay-as-you-go base URL."
+            "This workspace has no active OpenCode Go subscription \
+             (Go, Go Plus or Go Teams). Subscribe to a Go plan or switch to \
+             the pay-as-you-go base URL."
                 .to_string(),
         );
     }
