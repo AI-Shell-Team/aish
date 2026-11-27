@@ -128,6 +128,10 @@ pub fn get_all_providers() -> Vec<ProviderInfo> {
         ProviderInfo::new("openai-codex", "Codex")
             .with_api_base("https://chatgpt.com/backend-api/codex")
             .with_env_key("OPENAI_API_KEY"),
+        // 3c. OpenCode Go (OpenAI-compatible gateway; requires x-opencode-session)
+        ProviderInfo::new("opencode-go", "OpenCode Go")
+            .with_api_base("https://opencode.ai/inference/go/openai/v1")
+            .with_env_key("OPENCODE_API_KEY"),
         // 4. DeepSeek
         ProviderInfo::new("deepseek", "DeepSeek").with_env_key("DEEPSEEK_API_KEY"),
         // 5. Gemini

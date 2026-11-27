@@ -455,6 +455,11 @@ impl LlmSession {
         }
     }
 
+    /// Bind a stable conversation id for OpenCode Go routing / prompt cache.
+    pub fn set_opencode_session_id(&mut self, session_id: impl Into<String>) {
+        self.stream_ctx.set_opencode_session_id(session_id);
+    }
+
     /// Drain the tool-loop messages completed before the last mid-turn
     /// failure. Returns an empty vec when the previous turn succeeded (or
     /// failed before any tool ran). The caller is expected to persist these

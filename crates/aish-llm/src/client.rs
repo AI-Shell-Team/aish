@@ -6,6 +6,7 @@ use crate::api::{
 };
 use crate::llm_stream::LlmStream;
 use crate::model_id::resolve_model_for_api;
+use crate::providers::opencode_go;
 use crate::types::{ChatMessage, ToolSpec};
 
 /// HTTP client for OpenAI-compatible chat completion APIs.
@@ -16,6 +17,8 @@ pub struct LlmClient {
     api_base: parking_lot::Mutex<String>,
     api_key: parking_lot::Mutex<String>,
     model: parking_lot::Mutex<String>,
+    /// Stable conversation id for OpenCode Go's `x-opencode-session` header.
+    opencode_session_id: parking_lot::Mutex<Option<String>>,
     /// When true, send `Connection: close` so the server terminates the HTTP
     /// stream and closes first. One-shot probes use this to avoid leaving the
     /// upstream with a client-abort signature after the last SSE byte.
@@ -30,8 +33,15 @@ impl LlmClient {
             api_base: parking_lot::Mutex::new(api_base.trim_end_matches('/').into()),
             api_key: parking_lot::Mutex::new(api_key.into()),
             model: parking_lot::Mutex::new(model),
+            opencode_session_id: parking_lot::Mutex::new(None),
             close_connection: false,
         }
+    }
+
+    /// Bind the stable conversation id used for OpenCode Go requests.
+    pub fn with_opencode_session_id(mut self, session_id: Option<String>) -> Self {
+        *self.opencode_session_id.get_mut() = session_id;
+        self
     }
 
     /// Make this client close each connection after one request/response
@@ -73,11 +83,17 @@ impl LlmClient {
 
     /// Test connectivity by sending a lightweight request to the API.
     pub async fn test_connection(&self) -> Result<(), String> {
-        let url = format!("{}/models", self.api_base());
+        let api_base = self.api_base();
+        let url = format!("{}/models", api_base);
+        let provider_headers = {
+            let session_id = self.opencode_session_id.lock();
+            opencode_go::provider_headers(&api_base, session_id.as_deref())
+        };
         let resp = self
             .http
             .get(&url)
             .header("Authorization", format!("Bearer {}", self.api_key()))
+            .headers(provider_headers)
             .timeout(std::time::Duration::from_secs(5))
             .send()
             .await
@@ -200,7 +216,12 @@ impl LlmClient {
             }
         }
 
-        let url = format!("{}/chat/completions", self.api_base());
+        let api_base = self.api_base();
+        let url = format!("{}/chat/completions", api_base);
+        let provider_headers = {
+            let session_id = self.opencode_session_id.lock();
+            opencode_go::provider_headers(&api_base, session_id.as_deref())
+        };
 
         // Retry transient failures (5xx, 429, connect/timeout errors) with
         // exponential backoff. Errors that signal a bug or auth issue are
@@ -223,6 +244,7 @@ impl LlmClient {
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key()))
                 .header("Content-Type", "application/json")
+                .headers(provider_headers.clone())
                 .timeout(std::time::Duration::from_secs(120));
             if self.close_connection {
                 req = req.header("Connection", "close");
@@ -487,5 +509,44 @@ mod tests {
         assert!(msg.contains("400"));
         assert!(msg.contains("Bad request"));
         assert!(!msg.contains("Authentication"));
+    }
+
+    #[tokio::test]
+    async fn test_opencode_go_request_headers_and_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+
+        // Embed the OpenCode Go path in a local base URL so header injection
+        // is exercised without network access.
+        let api_base = format!("http://{addr}/opencode.ai/inference/go/openai/v1");
+        let client = LlmClient::new(&api_base, "oc_sk_test", "opencode-go/kimi-k3")
+            .with_opencode_session_id(Some("ses_test".to_string()));
+
+        let messages = vec![ChatMessage::user("hi")];
+        client
+            .chat_completion(&messages, None, false, None, None)
+            .await
+            .unwrap();
+
+        let request = server.await.unwrap().to_ascii_lowercase();
+        assert!(request.contains("x-opencode-session: ses_test"));
+        assert!(request.contains("user-agent: aish/"));
+        assert!(request.contains(r#""model":"kimi-k3""#));
     }
 }

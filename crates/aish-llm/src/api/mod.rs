@@ -40,6 +40,9 @@ pub struct StreamContext {
     /// Model name sent to the HTTP API (prefixes may be stripped).
     pub model: String,
     pub codex_auth_path: Option<PathBuf>,
+    /// Stable conversation id sent to OpenCode Go as `x-opencode-session`.
+    /// `None` lets the provider fall back to a process-wide id.
+    pub opencode_session_id: Option<String>,
     /// Send `Connection: close` on one-shot probe requests so the server
     /// closes the stream first and upstream accounting does not record a
     /// client abort. Never enable for interactive sessions.
@@ -62,8 +65,14 @@ impl StreamContext {
             config_model,
             model,
             codex_auth_path,
+            opencode_session_id: None,
             close_connection: false,
         }
+    }
+
+    /// Bind a stable conversation id for OpenCode Go routing / prompt cache.
+    pub fn set_opencode_session_id(&mut self, session_id: impl Into<String>) {
+        self.opencode_session_id = Some(session_id.into());
     }
 
     pub fn resolved_model(&self) -> String {
@@ -175,6 +184,10 @@ pub async fn test_connection(dialect: ApiDialect, ctx: &StreamContext) -> Result
 }
 
 pub(crate) fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
+    if let Some(hint) = crate::providers::opencode_go::error_hint(status, body) {
+        return format!("API error {}: {}\n{}", status, body.trim(), hint);
+    }
+
     let hint = match status.as_u16() {
         401 | 403 => "Authentication failed. Please check your API key.".to_string(),
         404 => {

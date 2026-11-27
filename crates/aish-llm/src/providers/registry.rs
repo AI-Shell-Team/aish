@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::anthropic::AnthropicProviderAdapter;
 use super::codex::CodexProviderAdapter;
 use super::openai_compat::OpenAiCompatProvider;
+use super::opencode_go::OpenCodeGoProviderAdapter;
 use super::types::ProviderAdapter;
 
 /// Registry that holds a list of provider adapters ordered by specificity.
@@ -23,6 +24,7 @@ impl ProviderRegistry {
             providers: vec![
                 Arc::new(CodexProviderAdapter),
                 Arc::new(AnthropicProviderAdapter),
+                Arc::new(OpenCodeGoProviderAdapter),
                 Arc::new(OpenAiCompatProvider),
             ],
         }
@@ -178,7 +180,10 @@ mod tests {
     fn test_registry_default() {
         let registry = ProviderRegistry::new();
         let ids = registry.list_provider_ids();
-        assert_eq!(ids, vec!["openai-codex", "anthropic", "openai-compat"]);
+        assert_eq!(
+            ids,
+            vec!["openai-codex", "anthropic", "opencode-go", "openai-compat"]
+        );
     }
 
     #[test]
@@ -244,6 +249,7 @@ mod tests {
             vec![
                 "openai-codex",
                 "anthropic",
+                "opencode-go",
                 "test-provider",
                 "openai-compat"
             ]
